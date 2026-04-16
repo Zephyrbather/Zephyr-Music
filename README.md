@@ -1,5 +1,6 @@
 # Zephyr Player
 
+本项目全称AI写，作者没有写一行代码，纯娱乐使用。
 Zephyr Player 是一个面向 macOS 的原生本地音乐播放器，基于 `SwiftUI` 和 `AVFoundation` 构建，专注于高品质本地音频播放、歌词体验、歌单管理和桌面场景使用。
 
 ## Highlights
@@ -107,35 +108,11 @@ xcodebuild -project MusicPlayer.xcodeproj -scheme MusicPlayer -configuration Deb
     └── Info.plist
 ```
 
-## Packaging
-
-如果你需要本地打包可双击运行的 `.app`：
-
-1. 用 Xcode 打开工程
-2. 选择 `Product > Build`
-3. 在 `DerivedData/Build/Products/Debug/` 或 `Release/` 下找到 `Zephyr Player.app`
-
-如果需要签名、分发或公证，请在 Xcode 中配置：
-
-- `Signing & Capabilities`
-- `Team`
-- `Bundle Identifier`
-
 ## Notes
 
 - 项目依赖 macOS 原生音频解码能力，个别 `DSD` 文件的可播放性取决于系统支持情况
 - 在线歌词和封面补全依赖网络请求，无网络时不影响本地播放
 - 听歌历史与应用状态均保存在本地，不上传到外部服务
-
-## Open Source Checklist
-
-- 已附带 `MIT` 许可证
-- 已忽略 `.DS_Store`、`DerivedData`、`xcuserdata`、`.build`
-- 发布前建议替换：
-  - GitHub 仓库地址
-  - `Bundle Identifier`
-  - 截图资源
-  - 作者信息
 
 ## License
 
