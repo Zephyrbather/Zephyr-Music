@@ -5,6 +5,10 @@ struct MusicPlayerApp: App {
     @StateObject private var viewModel = PlayerViewModel()
     @State private var desktopLyricsController: DesktopLyricsWindowController?
 
+    private var language: PlayerViewModel.AppLanguage {
+        viewModel.appLanguage
+    }
+
     var body: some Scene {
         WindowGroup("Zephyr Player") {
             ContentView(viewModel: viewModel)
@@ -65,7 +69,7 @@ struct MusicPlayerApp: App {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(viewModel.currentTrack?.title ?? "Zephyr Player")
                             .lineLimit(1)
-                        Text(viewModel.isPlaying ? "正在播放" : "已暂停")
+                        Text(viewModel.isPlaying ? language.pick("正在播放", "Playing") : language.pick("已暂停", "Paused"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -96,20 +100,20 @@ struct MusicPlayerApp: App {
 
                 Divider()
 
-                Button("添加音频文件") {
+                Button(language.pick("添加音频文件", "Add Audio Files")) {
                     viewModel.openFiles()
                 }
-                Button("扫描音频文件夹") {
+                Button(language.pick("扫描音频文件夹", "Scan Audio Folder")) {
                     viewModel.openFolder()
                 }
-                Button(viewModel.playbackMode.rawValue) {
+                Button(viewModel.playbackMode.title(in: language)) {
                     viewModel.cyclePlaybackMode()
                 }
-                Button(viewModel.isDesktopLyricsVisible ? "关闭桌面歌词" : "开启桌面歌词") {
+                Button(viewModel.isDesktopLyricsVisible ? language.pick("关闭桌面歌词", "Hide Desktop Lyrics") : language.pick("开启桌面歌词", "Show Desktop Lyrics")) {
                     viewModel.isDesktopLyricsVisible.toggle()
                 }
 
-                Button("听歌历史") {
+                Button(language.pick("听歌历史", "Listening History")) {
                     viewModel.listeningHistoryPresentationRequest += 1
                 }
             }
@@ -122,63 +126,67 @@ struct MusicPlayerApp: App {
             )
         }
 
+        Settings {
+            AppSettingsView(viewModel: viewModel)
+        }
+
         .commands {
             CommandGroup(after: .newItem) {
-                Button("添加音频文件") {
+                Button(language.pick("添加音频文件", "Add Audio Files")) {
                     viewModel.openFiles()
                 }
                 .keyboardShortcut("o", modifiers: [.command])
 
-                Button("扫描音频文件夹") {
+                Button(language.pick("扫描音频文件夹", "Scan Audio Folder")) {
                     viewModel.openFolder()
                 }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
 
-                Button("搜索歌单") {
+                Button(language.pick("搜索歌单", "Search Playlist")) {
                     viewModel.playlistSearchFocusRequest += 1
                 }
                 .keyboardShortcut("f", modifiers: [.command])
 
-                Button("听歌历史") {
+                Button(language.pick("听歌历史", "Listening History")) {
                     viewModel.listeningHistoryPresentationRequest += 1
                 }
                 .keyboardShortcut("h", modifiers: [.command, .option])
 
-                Button(viewModel.isDesktopLyricsVisible ? "关闭桌面歌词" : "开启桌面歌词") {
+                Button(viewModel.isDesktopLyricsVisible ? language.pick("关闭桌面歌词", "Hide Desktop Lyrics") : language.pick("开启桌面歌词", "Show Desktop Lyrics")) {
                     viewModel.isDesktopLyricsVisible.toggle()
                 }
                 .keyboardShortcut("l", modifiers: [.command, .option])
             }
 
-            CommandMenu("播放模式") {
+            CommandMenu(language.pick("播放模式", "Playback")) {
                 ForEach(PlayerViewModel.PlaybackMode.allCases) { mode in
                     Button {
                         viewModel.playbackMode = mode
                     } label: {
                         if viewModel.playbackMode == mode {
-                            Label(mode.rawValue, systemImage: "checkmark")
+                            Label(mode.title(in: language), systemImage: "checkmark")
                         } else {
-                            Label(mode.rawValue, systemImage: mode.symbolName)
+                            Label(mode.title(in: language), systemImage: mode.symbolName)
                         }
                     }
                 }
             }
 
-            CommandMenu("界面") {
+            CommandMenu(language.pick("界面", "Interface")) {
                 ForEach(PlayerViewModel.InterfaceMode.allCases) { mode in
                     Button {
                         viewModel.interfaceMode = mode
                     } label: {
                         if viewModel.interfaceMode == mode {
-                            Label(mode.rawValue, systemImage: "checkmark")
+                            Label(mode.title(in: language), systemImage: "checkmark")
                         } else {
-                            Label(mode.rawValue, systemImage: mode.symbolName)
+                            Label(mode.title(in: language), systemImage: mode.symbolName)
                         }
                     }
                 }
             }
 
-            CommandMenu("主题") {
+            CommandMenu(language.pick("主题", "Theme")) {
                 ForEach(PlayerViewModel.AppTheme.allCases) { theme in
                     Button {
                         if theme == .customImage {
@@ -188,9 +196,9 @@ struct MusicPlayerApp: App {
                         }
                     } label: {
                         if viewModel.appTheme == theme {
-                            Label(theme.rawValue, systemImage: "checkmark")
+                            Label(theme.title(in: language), systemImage: "checkmark")
                         } else {
-                            Text(theme.rawValue)
+                            Text(theme.title(in: language))
                         }
                     }
                 }
@@ -198,36 +206,36 @@ struct MusicPlayerApp: App {
                 if viewModel.customBackgroundImagePath != nil {
                     Divider()
 
-                    Button("更换自定义图片") {
+                    Button(language.pick("更换自定义图片", "Replace Custom Image")) {
                         viewModel.openCustomBackgroundImage()
                     }
 
-                    Button("移除自定义图片") {
+                    Button(language.pick("移除自定义图片", "Remove Custom Image")) {
                         viewModel.clearCustomBackgroundImage()
                     }
                 }
             }
 
-            CommandMenu("歌单") {
+            CommandMenu(language.pick("歌单", "Playlist")) {
                 ForEach(viewModel.playlists) { playlist in
                     Button {
                         viewModel.selectPlaylist(playlist.id)
                     } label: {
                         if viewModel.selectedPlaylistID == playlist.id {
-                            Label(playlist.name, systemImage: "checkmark")
+                            Label(viewModel.displayName(for: playlist), systemImage: "checkmark")
                         } else {
-                            Text(playlist.name)
+                            Text(viewModel.displayName(for: playlist))
                         }
                     }
                 }
 
-                Button("新建歌单") {
+                Button(language.pick("新建歌单", "New Playlist")) {
                     viewModel.createPlaylist()
                 }
             }
 
-            CommandMenu("均衡器") {
-                Button(viewModel.isEqualizerEnabled ? "关闭均衡器" : "启用均衡器") {
+            CommandMenu(language.pick("均衡器", "Equalizer")) {
+                Button(viewModel.isEqualizerEnabled ? language.pick("关闭均衡器", "Disable Equalizer") : language.pick("启用均衡器", "Enable Equalizer")) {
                     viewModel.isEqualizerEnabled.toggle()
                 }
 
@@ -238,24 +246,24 @@ struct MusicPlayerApp: App {
                         viewModel.applyEqualizerPreset(preset)
                     } label: {
                         if viewModel.selectedEqualizerPreset == preset {
-                            Label(preset.rawValue, systemImage: "checkmark")
+                            Label(preset.title(in: language), systemImage: "checkmark")
                         } else {
-                            Text(preset.rawValue)
+                            Text(preset.title(in: language))
                         }
                     }
                 }
 
-                Button(viewModel.isEqualizerExpanded ? "收起均衡器面板" : "展开均衡器面板") {
+                Button(viewModel.isEqualizerExpanded ? language.pick("收起均衡器面板", "Collapse Equalizer Panel") : language.pick("展开均衡器面板", "Expand Equalizer Panel")) {
                     viewModel.isEqualizerExpanded.toggle()
                 }
 
-                Button("重置均衡器") {
+                Button(language.pick("重置均衡器", "Reset Equalizer")) {
                     viewModel.resetEqualizer()
                 }
             }
 
-            CommandMenu("桌面歌词") {
-                Button(viewModel.isDesktopLyricsVisible ? "关闭桌面歌词" : "开启桌面歌词") {
+            CommandMenu(language.pick("桌面歌词", "Desktop Lyrics")) {
+                Button(viewModel.isDesktopLyricsVisible ? language.pick("关闭桌面歌词", "Hide Desktop Lyrics") : language.pick("开启桌面歌词", "Show Desktop Lyrics")) {
                     viewModel.isDesktopLyricsVisible.toggle()
                 }
 
@@ -266,9 +274,9 @@ struct MusicPlayerApp: App {
                         viewModel.desktopLyricsDisplayMode = mode
                     } label: {
                         if viewModel.desktopLyricsDisplayMode == mode {
-                            Label(mode.rawValue, systemImage: "checkmark")
+                            Label(mode.title(in: language), systemImage: "checkmark")
                         } else {
-                            Text(mode.rawValue)
+                            Text(mode.title(in: language))
                         }
                     }
                 }
@@ -280,35 +288,64 @@ struct MusicPlayerApp: App {
                         viewModel.desktopLyricsBackgroundStyle = style
                     } label: {
                         if viewModel.desktopLyricsBackgroundStyle == style {
-                            Label(style.rawValue, systemImage: "checkmark")
+                            Label(style.title(in: language), systemImage: "checkmark")
                         } else {
-                            Text(style.rawValue)
+                            Text(style.title(in: language))
                         }
                     }
                 }
 
-                Button(viewModel.isDesktopLyricsLocked ? "解除锁定位置" : "锁定位置") {
+                Button(viewModel.isDesktopLyricsLocked ? language.pick("解除锁定位置", "Unlock Position") : language.pick("锁定位置", "Lock Position")) {
                     viewModel.isDesktopLyricsLocked.toggle()
                 }
 
                 Divider()
 
-                Button("字号减小 (\(Int(viewModel.desktopLyricsFontSize)))") {
+                Button(language.pick("字号减小", "Decrease Font Size") + " (\(Int(viewModel.desktopLyricsFontSize)))") {
                     viewModel.desktopLyricsFontSize = max(20, viewModel.desktopLyricsFontSize - 1)
                 }
 
-                Button("字号增大 (\(Int(viewModel.desktopLyricsFontSize)))") {
+                Button(language.pick("字号增大", "Increase Font Size") + " (\(Int(viewModel.desktopLyricsFontSize)))") {
                     viewModel.desktopLyricsFontSize = min(44, viewModel.desktopLyricsFontSize + 1)
                 }
 
-                Button("透明度降低 (\(Int(viewModel.desktopLyricsOpacity * 100))%)") {
+                Button(language.pick("透明度降低", "Decrease Opacity") + " (\(Int(viewModel.desktopLyricsOpacity * 100))%)") {
                     viewModel.desktopLyricsOpacity = max(0.35, viewModel.desktopLyricsOpacity - 0.05)
                 }
 
-                Button("透明度提高 (\(Int(viewModel.desktopLyricsOpacity * 100))%)") {
+                Button(language.pick("透明度提高", "Increase Opacity") + " (\(Int(viewModel.desktopLyricsOpacity * 100))%)") {
                     viewModel.desktopLyricsOpacity = min(1, viewModel.desktopLyricsOpacity + 0.05)
                 }
             }
         }
+    }
+}
+
+private struct AppSettingsView: View {
+    @ObservedObject var viewModel: PlayerViewModel
+
+    private var language: PlayerViewModel.AppLanguage {
+        viewModel.appLanguage
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                Picker(language.pick("界面语言", "Interface Language"), selection: $viewModel.appLanguage) {
+                    ForEach(PlayerViewModel.AppLanguage.allCases) { option in
+                        Text(language.title(for: option)).tag(option)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                Text(language.pick("切换后界面文案会立即更新。", "Interface text updates immediately after switching."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text(language.pick("语言", "Language"))
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
     }
 }

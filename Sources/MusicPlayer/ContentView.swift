@@ -9,6 +9,19 @@ struct ContentView: View {
         case album = "专辑"
 
         var id: String { rawValue }
+
+        func title(in language: PlayerViewModel.AppLanguage) -> String {
+            switch self {
+            case .addedOrder:
+                return language.pick("导入顺序", "Import Order")
+            case .title:
+                return language.pick("歌曲名", "Title")
+            case .artist:
+                return language.pick("艺术家", "Artist")
+            case .album:
+                return language.pick("专辑", "Album")
+            }
+        }
     }
 
     @ObservedObject var viewModel: PlayerViewModel
@@ -32,6 +45,22 @@ struct ContentView: View {
 
     private var theme: PlayerTheme {
         PlayerTheme.forSelection(viewModel.appTheme, colorScheme: colorScheme)
+    }
+
+    private var language: PlayerViewModel.AppLanguage {
+        viewModel.appLanguage
+    }
+
+    private var allArtistsLabel: String {
+        language.pick("全部艺术家", "All Artists")
+    }
+
+    private var allAlbumsLabel: String {
+        language.pick("全部专辑", "All Albums")
+    }
+
+    private func tr(_ chinese: String, _ english: String) -> String {
+        language.pick(chinese, english)
     }
 
     private var artistOptions: [String] { artistOptionsCache }
@@ -99,9 +128,14 @@ struct ContentView: View {
             refreshPlaylistDerivedState()
         }
         .onChange(of: viewModel.selectedPlaylistID) { _ in
-            selectedArtistFilter = "全部艺术家"
-            selectedAlbumFilter = "全部专辑"
+            selectedArtistFilter = allArtistsLabel
+            selectedAlbumFilter = allAlbumsLabel
             playlistSearchText = ""
+            refreshPlaylistDerivedState()
+        }
+        .onChange(of: viewModel.appLanguage) { _ in
+            selectedArtistFilter = allArtistsLabel
+            selectedAlbumFilter = allAlbumsLabel
             refreshPlaylistDerivedState()
         }
         .onChange(of: playlistSearchText) { _ in
@@ -117,18 +151,18 @@ struct ContentView: View {
             refreshPlaylistDerivedState()
         }
         .sheet(isPresented: $isHistorySheetPresented) {
-            ListeningHistorySheet(viewModel: viewModel, theme: theme)
+            ListeningHistorySheet(viewModel: viewModel, theme: theme, language: language)
         }
         .sheet(isPresented: $isCreatePlaylistSheetPresented) {
             createPlaylistSheet
         }
-        .alert("删除歌单", isPresented: $isDeletePlaylistAlertPresented) {
-            Button("取消", role: .cancel) {}
-            Button("删除", role: .destructive) {
+        .alert(tr("删除歌单", "Delete Playlist"), isPresented: $isDeletePlaylistAlertPresented) {
+            Button(tr("取消", "Cancel"), role: .cancel) {}
+            Button(tr("删除", "Delete"), role: .destructive) {
                 viewModel.removeSelectedPlaylist()
             }
         } message: {
-            Text("确定删除“\(viewModel.selectedPlaylistName)”吗？该歌单中的待播项目也会一并移除。")
+            Text(tr("确定删除“\(viewModel.selectedPlaylistName)”吗？该歌单中的待播项目也会一并移除。", "Delete \"\(viewModel.selectedPlaylistName)\"? Queued tracks from this playlist will also be removed."))
         }
     }
 
@@ -173,29 +207,29 @@ struct ContentView: View {
             HStack(spacing: 10) {
                 playlistSwitcher
 
-                Button("均衡器") {
+                Button(tr("均衡器", "Equalizer")) {
                     viewModel.isEqualizerExpanded.toggle()
                 }
                 .fixedSize()
 
                 themeMenu
 
-                Button(viewModel.interfaceMode.rawValue) {
+                Button(viewModel.interfaceMode.title(in: language)) {
                     viewModel.toggleInterfaceMode()
                 }
                 .fixedSize()
 
-                Button("听歌历史") {
+                Button(tr("听歌历史", "Listening History")) {
                     isHistorySheetPresented = true
                 }
                 .fixedSize()
 
-                Button("扫描文件夹") {
+                Button(tr("扫描文件夹", "Scan Folder")) {
                     viewModel.openFolder()
                 }
                 .fixedSize()
 
-                Button("添加音频") {
+                Button(tr("添加音频", "Add Audio")) {
                     viewModel.openFiles()
                 }
                 .fixedSize()
@@ -210,17 +244,17 @@ struct ContentView: View {
 
             HStack(spacing: 8) {
                 Menu {
-                    Button("添加歌曲") {
+                    Button(tr("添加歌曲", "Add Songs")) {
                         viewModel.openFiles()
                     }
 
-                    Button("添加文件夹") {
+                    Button(tr("添加文件夹", "Add Folder")) {
                         viewModel.openFolder()
                     }
 
-                    Menu("从歌单添加") {
+                    Menu(tr("从歌单添加", "Add From Playlist")) {
                         ForEach(viewModel.playlists.filter { $0.id != viewModel.selectedPlaylistID }) { playlist in
-                            Button(playlist.name) {
+                            Button(viewModel.displayName(for: playlist)) {
                                 viewModel.addTracks(fromPlaylist: playlist.id)
                             }
                         }
@@ -264,10 +298,10 @@ struct ContentView: View {
                 artworkView(size: 134, cornerRadius: 20)
 
                 VStack(alignment: .leading, spacing: 14) {
-                    Text("正在播放")
+                    Text(tr("正在播放", "Now Playing"))
                         .font(.headline)
 
-                    Text(viewModel.currentTrack?.title ?? "未选择歌曲")
+                    Text(viewModel.currentTrack?.title ?? tr("未选择歌曲", "No Track Selected"))
                         .font(.title3.weight(.semibold))
                         .lineLimit(1)
 
@@ -289,7 +323,7 @@ struct ContentView: View {
                 artworkView(size: 54, cornerRadius: 12)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(viewModel.currentTrack?.title ?? "未选择歌曲")
+                    Text(viewModel.currentTrack?.title ?? tr("未选择歌曲", "No Track Selected"))
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
 
@@ -301,7 +335,7 @@ struct ContentView: View {
 
                 Spacer(minLength: 0)
 
-                Text(viewModel.isPlaying ? "播放中" : "暂停")
+                Text(viewModel.isPlaying ? tr("播放中", "Playing") : tr("暂停", "Paused"))
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(theme.accent)
                     .shadow(color: theme.primaryShadow, radius: usesImageBackground ? 8 : 0)
@@ -321,13 +355,13 @@ struct ContentView: View {
             } label: {
                 Image(systemName: "backward.fill")
             }
-            .help("上一首")
+            .help(tr("上一首", "Previous"))
             .fixedSize()
 
             Button {
                 viewModel.togglePlayback()
             } label: {
-                Label(viewModel.isPlaying ? "暂停" : "播放",
+                Label(viewModel.isPlaying ? tr("暂停", "Pause") : tr("播放", "Play"),
                       systemImage: viewModel.isPlaying ? "pause.fill" : "play.fill")
             }
             .keyboardShortcut(.space, modifiers: [])
@@ -338,13 +372,13 @@ struct ContentView: View {
             } label: {
                 Image(systemName: "forward.fill")
             }
-            .help("下一首")
+            .help(tr("下一首", "Next"))
             .fixedSize()
 
             Button {
                 viewModel.cyclePlaybackMode()
             } label: {
-                Label(viewModel.playbackMode.rawValue, systemImage: viewModel.playbackMode.symbolName)
+                Label(viewModel.playbackMode.title(in: language), systemImage: viewModel.playbackMode.symbolName)
             }
             .fixedSize()
 
@@ -363,7 +397,7 @@ struct ContentView: View {
                 viewModel.isDesktopLyricsVisible.toggle()
             } label: {
                 Label(
-                    viewModel.isDesktopLyricsVisible ? "关闭桌面歌词" : "桌面歌词",
+                    viewModel.isDesktopLyricsVisible ? tr("关闭桌面歌词", "Hide Desktop Lyrics") : tr("桌面歌词", "Desktop Lyrics"),
                     systemImage: viewModel.isDesktopLyricsVisible ? "rectangle.on.rectangle.slash" : "rectangle.on.rectangle"
                 )
             }
@@ -372,7 +406,7 @@ struct ContentView: View {
             Button {
                 viewModel.isEqualizerExpanded.toggle()
             } label: {
-                Label(viewModel.isEqualizerExpanded ? "收起均衡器" : "展开均衡器", systemImage: "slider.horizontal.3")
+                Label(viewModel.isEqualizerExpanded ? tr("收起均衡器", "Hide Equalizer") : tr("展开均衡器", "Show Equalizer"), systemImage: "slider.horizontal.3")
             }
             .fixedSize()
         }
@@ -429,26 +463,26 @@ struct ContentView: View {
     private var equalizerSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text("均衡器")
+                Text(tr("均衡器", "Equalizer"))
                     .font(.headline)
 
                 Spacer()
 
-                Toggle("启用", isOn: $viewModel.isEqualizerEnabled)
+                Toggle(tr("启用", "Enable"), isOn: $viewModel.isEqualizerEnabled)
                     .toggleStyle(.switch)
 
-                Button("重置") {
+                Button(tr("重置", "Reset")) {
                     viewModel.resetEqualizer()
                 }
             }
 
             HStack(spacing: 12) {
-                Text("预设")
+                Text(tr("预设", "Preset"))
                     .foregroundStyle(theme.secondaryText)
 
-                Picker("预设", selection: $viewModel.selectedEqualizerPreset) {
+                Picker(tr("预设", "Preset"), selection: $viewModel.selectedEqualizerPreset) {
                     ForEach(PlayerViewModel.EqualizerPreset.allCases) { preset in
-                        Text(preset.rawValue).tag(preset)
+                        Text(preset.title(in: language)).tag(preset)
                     }
                 }
                 .pickerStyle(.menu)
@@ -458,7 +492,7 @@ struct ContentView: View {
 
                 Spacer()
 
-                Text(viewModel.isEqualizerEnabled ? "当前已启用" : "当前未启用")
+                Text(viewModel.isEqualizerEnabled ? tr("当前已启用", "Enabled") : tr("当前未启用", "Disabled"))
                     .font(.caption)
                     .foregroundStyle(viewModel.isEqualizerEnabled ? theme.accent : theme.secondaryText)
             }
@@ -511,6 +545,7 @@ struct ContentView: View {
                         isCurrent: viewModel.currentIndex == item.index,
                         isPlaying: viewModel.isPlaying,
                         theme: theme,
+                        language: language,
                         isQueuedNext: viewModel.queuedTrackPaths.contains(item.track.url.standardizedFileURL.path),
                         query: playlistSearchText
                     ) {
@@ -572,14 +607,14 @@ struct ContentView: View {
                             sortOption = option
                         } label: {
                             if sortOption == option {
-                                Label(option.rawValue, systemImage: "checkmark")
+                                Label(option.title(in: language), systemImage: "checkmark")
                             } else {
-                                Text(option.rawValue)
+                                Text(option.title(in: language))
                             }
                         }
                     }
                 } label: {
-                    filterMenuLabel(sortOption.rawValue)
+                    filterMenuLabel(sortOption.title(in: language))
                 }
             }
             .font(.caption)
@@ -592,6 +627,7 @@ struct ContentView: View {
                         isCurrent: viewModel.currentIndex == item.index,
                         isPlaying: viewModel.isPlaying,
                         theme: theme,
+                        language: language,
                         isQueuedNext: viewModel.queuedTrackPaths.contains(item.track.url.standardizedFileURL.path),
                         query: playlistSearchText
                     ) {
@@ -613,14 +649,14 @@ struct ContentView: View {
     private var playlistHeader: some View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("播放列表")
+                Text(tr("播放列表", "Playlist"))
                     .font(.headline)
                 Text(viewModel.selectedPlaylistName)
                     .font(.caption)
                     .foregroundStyle(theme.secondaryText)
             }
             Spacer()
-            Text("\(filteredPlaylist.count) / \(viewModel.playlist.count) 首")
+            Text(tr("\(filteredPlaylist.count) / \(viewModel.playlist.count) 首", "\(filteredPlaylist.count) / \(viewModel.playlist.count) tracks"))
                 .foregroundStyle(theme.secondaryText)
         }
     }
@@ -644,9 +680,9 @@ struct ContentView: View {
                         viewModel.selectedPlaylistID = playlist.id
                     } label: {
                         if viewModel.selectedPlaylistID == playlist.id {
-                            Label(playlist.name, systemImage: "checkmark")
+                            Label(viewModel.displayName(for: playlist), systemImage: "checkmark")
                         } else {
-                            Text(playlist.name)
+                            Text(viewModel.displayName(for: playlist))
                         }
                     }
                 }
@@ -668,14 +704,14 @@ struct ContentView: View {
             } label: {
                 Image(systemName: "text.badge.plus")
             }
-            .help("新建歌单")
+            .help(tr("新建歌单", "New Playlist"))
 
             Button {
                 isDeletePlaylistAlertPresented = true
             } label: {
                 Image(systemName: "trash")
             }
-            .help("删除当前歌单")
+            .help(tr("删除当前歌单", "Delete Current Playlist"))
             .disabled(viewModel.playlists.count <= 1)
         }
         .frame(maxWidth: .infinity)
@@ -686,7 +722,7 @@ struct ContentView: View {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(theme.secondaryText)
 
-            TextField("搜索歌曲、格式或文件夹", text: $playlistSearchText)
+            TextField(tr("搜索歌曲、格式或文件夹", "Search songs, formats, or folders"), text: $playlistSearchText)
                 .textFieldStyle(.plain)
                 .focused($isPlaylistSearchFocused)
                 .foregroundColor(theme.primaryText)
@@ -719,7 +755,7 @@ struct ContentView: View {
                 .font(.caption)
                 .foregroundStyle(theme.secondaryText)
 
-            TextField("搜索", text: $playlistSearchText)
+            TextField(tr("搜索", "Search"), text: $playlistSearchText)
                 .textFieldStyle(.plain)
                 .focused($isPlaylistSearchFocused)
                 .foregroundColor(theme.primaryText)
@@ -786,14 +822,14 @@ struct ContentView: View {
                         sortOption = option
                     } label: {
                         if sortOption == option {
-                            Label(option.rawValue, systemImage: "checkmark")
+                            Label(option.title(in: language), systemImage: "checkmark")
                         } else {
-                            Text(option.rawValue)
+                            Text(option.title(in: language))
                         }
                     }
                 }
             } label: {
-                filterMenuLabel(sortOption.rawValue)
+                filterMenuLabel(sortOption.title(in: language))
             }
         }
     }
@@ -841,7 +877,7 @@ struct ContentView: View {
 
     private var lyricsPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("歌词")
+            Text(tr("歌词", "Lyrics"))
                 .font(.headline)
 
             if !viewModel.lyrics.timedLines.isEmpty {
@@ -892,7 +928,7 @@ struct ContentView: View {
                 }
             } else {
                 Spacer()
-                Text("当前歌曲未找到歌词文件。\n将同名 `.lrc` 或 `.txt` 放在音频文件旁即可自动加载。")
+                Text(tr("当前歌曲未找到歌词文件。\n将同名 `.lrc` 或 `.txt` 放在音频文件旁即可自动加载。", "No lyrics were found for the current track.\nPlace a matching `.lrc` or `.txt` file next to the audio file to load it automatically."))
                     .foregroundStyle(theme.secondaryText)
                 Spacer()
             }
@@ -932,9 +968,9 @@ struct ContentView: View {
 
     private var nowPlayingSubtitle: String {
         [
-            viewModel.currentTrack?.artist ?? "未知艺术家",
-            viewModel.currentTrack?.album ?? "未知专辑",
-            viewModel.currentTrack?.fileExtension ?? "等待加载"
+            viewModel.currentTrack?.artist ?? tr("未知艺术家", "Unknown Artist"),
+            viewModel.currentTrack?.album ?? tr("未知专辑", "Unknown Album"),
+            viewModel.currentTrack?.fileExtension ?? tr("等待加载", "Loading")
         ].joined(separator: " · ")
     }
 
@@ -996,9 +1032,9 @@ struct ContentView: View {
                 }
             } label: {
                 if viewModel.appTheme == themeOption {
-                    Label(themeOption.rawValue, systemImage: "checkmark")
+                    Label(themeOption.title(in: language), systemImage: "checkmark")
                 } else {
-                    Text(themeOption.rawValue)
+                    Text(themeOption.title(in: language))
                 }
             }
         }
@@ -1006,11 +1042,11 @@ struct ContentView: View {
         if viewModel.customBackgroundImagePath != nil {
             Divider()
 
-            Button("更换自定义图片") {
+            Button(tr("更换自定义图片", "Replace Custom Image")) {
                 viewModel.openCustomBackgroundImage()
             }
 
-            Button("移除自定义图片") {
+            Button(tr("移除自定义图片", "Remove Custom Image")) {
                 viewModel.clearCustomBackgroundImage()
             }
         }
@@ -1018,20 +1054,20 @@ struct ContentView: View {
 
     private var createPlaylistSheet: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("新建歌单")
+            Text(tr("新建歌单", "New Playlist"))
                 .font(.title3.weight(.semibold))
 
-            TextField("输入歌单名称", text: $newPlaylistName)
+            TextField(tr("输入歌单名称", "Enter playlist name"), text: $newPlaylistName)
                 .textFieldStyle(.roundedBorder)
 
             HStack {
                 Spacer()
 
-                Button("取消") {
+                Button(tr("取消", "Cancel")) {
                     isCreatePlaylistSheetPresented = false
                 }
 
-                Button("创建") {
+                Button(tr("创建", "Create")) {
                     viewModel.createPlaylist(named: newPlaylistName)
                     isCreatePlaylistSheetPresented = false
                 }
@@ -1092,7 +1128,7 @@ struct ContentView: View {
                         VStack(spacing: 10) {
                             Image(systemName: "square.and.arrow.down.on.square")
                                 .font(.system(size: 42, weight: .semibold))
-                            Text("拖入音频文件或文件夹以导入歌单")
+                            Text(tr("拖入音频文件或文件夹以导入歌单", "Drop audio files or folders to import"))
                                 .font(.title3.weight(.semibold))
                         }
                         .foregroundStyle(theme.accent)
@@ -1111,14 +1147,14 @@ struct ContentView: View {
     }
 
     private func compareByArtist(lhs: (index: Int, track: AudioTrack), rhs: (index: Int, track: AudioTrack)) -> Bool {
-        let left = (lhs.track.artist ?? "未知艺术家") + lhs.track.title
-        let right = (rhs.track.artist ?? "未知艺术家") + rhs.track.title
+        let left = (lhs.track.artist ?? tr("未知艺术家", "Unknown Artist")) + lhs.track.title
+        let right = (rhs.track.artist ?? tr("未知艺术家", "Unknown Artist")) + rhs.track.title
         return left.localizedStandardCompare(right) == .orderedAscending
     }
 
     private func compareByAlbum(lhs: (index: Int, track: AudioTrack), rhs: (index: Int, track: AudioTrack)) -> Bool {
-        let left = (lhs.track.album ?? "未知专辑") + lhs.track.title
-        let right = (rhs.track.album ?? "未知专辑") + rhs.track.title
+        let left = (lhs.track.album ?? tr("未知专辑", "Unknown Album")) + lhs.track.title
+        let right = (rhs.track.album ?? tr("未知专辑", "Unknown Album")) + rhs.track.title
         return left.localizedStandardCompare(right) == .orderedAscending
     }
 
@@ -1153,14 +1189,14 @@ struct ContentView: View {
 
     private func refreshPlaylistDerivedState() {
         let playlist = viewModel.playlist
-        artistOptionsCache = ["全部艺术家"] + Set(playlist.compactMap(\.artist)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
-        albumOptionsCache = ["全部专辑"] + Set(playlist.compactMap(\.album)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        artistOptionsCache = [allArtistsLabel] + Set(playlist.compactMap(\.artist)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        albumOptionsCache = [allAlbumsLabel] + Set(playlist.compactMap(\.album)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
 
         if !artistOptionsCache.contains(selectedArtistFilter) {
-            selectedArtistFilter = "全部艺术家"
+            selectedArtistFilter = allArtistsLabel
         }
         if !albumOptionsCache.contains(selectedAlbumFilter) {
-            selectedAlbumFilter = "全部专辑"
+            selectedAlbumFilter = allAlbumsLabel
         }
 
         let items = Array(playlist.enumerated())
@@ -1171,11 +1207,11 @@ struct ContentView: View {
         let filtered = items.compactMap { item -> (Int, AudioTrack)? in
             let track = item.element
 
-            if selectedArtistFilter != "全部艺术家", track.artist != selectedArtistFilter {
+            if selectedArtistFilter != allArtistsLabel, track.artist != selectedArtistFilter {
                 return nil
             }
 
-            if selectedAlbumFilter != "全部专辑", track.album != selectedAlbumFilter {
+            if selectedAlbumFilter != allAlbumsLabel, track.album != selectedAlbumFilter {
                 return nil
             }
 
@@ -1315,6 +1351,7 @@ private struct PlaylistRow: View {
     let isCurrent: Bool
     let isPlaying: Bool
     let theme: PlayerTheme
+    let language: PlayerViewModel.AppLanguage
     let isQueuedNext: Bool
     let query: String
     let action: () -> Void
@@ -1327,8 +1364,8 @@ private struct PlaylistRow: View {
                     highlightedText(track.title, query: query)
                         .foregroundStyle(theme.primaryText)
                     Text([
-                        track.artist ?? "未知艺术家",
-                        track.album ?? "未知专辑",
+                        track.artist ?? language.pick("未知艺术家", "Unknown Artist"),
+                        track.album ?? language.pick("未知专辑", "Unknown Album"),
                         track.fileExtension
                     ].joined(separator: " · "))
                         .font(.caption)
@@ -1337,7 +1374,7 @@ private struct PlaylistRow: View {
                 }
                 Spacer()
                 if isQueuedNext {
-                    Label("待播", systemImage: "text.line.first.and.arrowtriangle.forward")
+                    Label(language.pick("待播", "Queued"), systemImage: "text.line.first.and.arrowtriangle.forward")
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(theme.secondaryText)
                 }
@@ -1350,7 +1387,7 @@ private struct PlaylistRow: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            Button("下一首播放") {
+            Button(language.pick("下一首播放", "Play Next")) {
                 queueNextAction()
             }
         }
@@ -1381,10 +1418,22 @@ private struct ListeningHistorySheet: View {
         case recent = "最近 100 首"
 
         var id: String { rawValue }
+
+        func title(in language: PlayerViewModel.AppLanguage) -> String {
+            switch self {
+            case .monthly:
+                return language.pick("月度统计", "Monthly")
+            case .yearly:
+                return language.pick("年度统计", "Yearly")
+            case .recent:
+                return language.pick("最近 100 首", "Recent 100")
+            }
+        }
     }
 
     @ObservedObject var viewModel: PlayerViewModel
     let theme: PlayerTheme
+    let language: PlayerViewModel.AppLanguage
     @Environment(\.dismiss) private var dismiss
     @State private var selectedScope: HistoryScope = .monthly
     @State private var selectedMonthID: String?
@@ -1414,27 +1463,31 @@ private struct ListeningHistorySheet: View {
         return yearlySummaries.first
     }
 
+    private func tr(_ chinese: String, _ english: String) -> String {
+        language.pick(chinese, english)
+    }
+
     var body: some View {
         VStack(spacing: 18) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("听歌历史")
+                    Text(tr("听歌历史", "Listening History"))
                         .font(.title3.weight(.bold))
-                    Text("按月份查看最常听歌曲与累计播放次数")
+                    Text(tr("按月份、年份或最近记录查看最常听歌曲与累计播放次数", "Browse your top tracks and play counts by month, year, or recent history"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
                 Spacer()
 
-                Button("关闭") {
+                Button(tr("关闭", "Close")) {
                     dismiss()
                 }
             }
 
-            Picker("范围", selection: $selectedScope) {
+            Picker(tr("范围", "Scope"), selection: $selectedScope) {
                 ForEach(HistoryScope.allCases) { scope in
-                    Text(scope.rawValue).tag(scope)
+                    Text(scope.title(in: language)).tag(scope)
                 }
             }
             .pickerStyle(.segmented)
@@ -1445,9 +1498,9 @@ private struct ListeningHistorySheet: View {
                     Image(systemName: "clock.badge.questionmark")
                         .font(.system(size: 34, weight: .semibold))
                         .foregroundStyle(theme.accent)
-                    Text("还没有听歌历史")
+                    Text(tr("还没有听歌历史", "No listening history yet"))
                         .font(.headline)
-                    Text("开始播放歌曲后，这里会统计每月最常听的歌。")
+                    Text(tr("开始播放歌曲后，这里会统计每月最常听的歌。", "Play some music and your monthly listening stats will appear here."))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -1480,7 +1533,7 @@ private struct ListeningHistorySheet: View {
     private var monthlyHistoryContent: some View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 10) {
-                Text("月份")
+                Text(tr("月份", "Month"))
                     .font(.headline)
 
                 ScrollView {
@@ -1492,7 +1545,7 @@ private struct ListeningHistorySheet: View {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(monthTitle(for: summary.monthStart))
                                         .font(.subheadline.weight(.semibold))
-                                    Text("总播放 \(summary.totalPlays) 次")
+                                    Text(tr("总播放 \(summary.totalPlays) 次", "\(summary.totalPlays) plays"))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -1511,7 +1564,11 @@ private struct ListeningHistorySheet: View {
             .frame(width: 180)
 
             summaryTrackList(
-                title: selectedSummary.map { "\(monthTitle(for: $0.monthStart)) 最常听" } ?? "月度统计",
+                title: selectedSummary.map {
+                    language == .chinese
+                        ? "\(monthTitle(for: $0.monthStart)) 最常听"
+                        : "Top Tracks of \(monthTitle(for: $0.monthStart))"
+                } ?? tr("月度统计", "Monthly Stats"),
                 tracks: selectedSummary?.tracks ?? []
             )
         }
@@ -1520,7 +1577,7 @@ private struct ListeningHistorySheet: View {
     private var yearlyHistoryContent: some View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 10) {
-                Text("年份")
+                Text(tr("年份", "Year"))
                     .font(.headline)
 
                 ScrollView {
@@ -1530,9 +1587,9 @@ private struct ListeningHistorySheet: View {
                                 selectedYearID = summary.id
                             } label: {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text("\(summary.year) 年")
+                                    Text(language == .chinese ? "\(summary.year) 年" : "\(summary.year)")
                                         .font(.subheadline.weight(.semibold))
-                                    Text("总播放 \(summary.totalPlays) 次")
+                                    Text(tr("总播放 \(summary.totalPlays) 次", "\(summary.totalPlays) plays"))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -1551,7 +1608,11 @@ private struct ListeningHistorySheet: View {
             .frame(width: 180)
 
             summaryTrackList(
-                title: selectedYearSummary.map { "\($0.year) 年最常听" } ?? "年度统计",
+                title: selectedYearSummary.map {
+                    language == .chinese
+                        ? "\($0.year) 年最常听"
+                        : "Top Tracks of \($0.year)"
+                } ?? tr("年度统计", "Yearly Stats"),
                 tracks: selectedYearSummary?.tracks ?? []
             )
         }
@@ -1559,7 +1620,7 @@ private struct ListeningHistorySheet: View {
 
     private var recentHistoryContent: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("最近听歌记录")
+            Text(tr("最近听歌记录", "Recent Listening"))
                 .font(.headline)
 
             List {
@@ -1574,8 +1635,8 @@ private struct ListeningHistorySheet: View {
                             Text(item.title)
                                 .font(.body.weight(.semibold))
                             Text([
-                                item.artist ?? "未知艺术家",
-                                item.album ?? "未知专辑"
+                                item.artist ?? tr("未知艺术家", "Unknown Artist"),
+                                item.album ?? tr("未知专辑", "Unknown Album")
                             ].joined(separator: " · "))
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -1616,8 +1677,8 @@ private struct ListeningHistorySheet: View {
                             Text(item.title)
                                 .font(.body.weight(.semibold))
                             Text([
-                                item.artist ?? "未知艺术家",
-                                item.album ?? "未知专辑"
+                                item.artist ?? tr("未知艺术家", "Unknown Artist"),
+                                item.album ?? tr("未知专辑", "Unknown Album")
                             ].joined(separator: " · "))
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -1625,7 +1686,7 @@ private struct ListeningHistorySheet: View {
 
                         Spacer()
 
-                        Text("\(item.playCount) 次")
+                        Text(tr("\(item.playCount) 次", "\(item.playCount) plays"))
                             .font(.subheadline.monospacedDigit().weight(.semibold))
                             .foregroundStyle(theme.accent)
                     }
@@ -1639,21 +1700,21 @@ private struct ListeningHistorySheet: View {
 
     private func monthTitle(for date: Date) -> String {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "yyyy年M月"
+        formatter.locale = Locale(identifier: language.localeIdentifier)
+        formatter.dateFormat = language == .chinese ? "yyyy年M月" : "MMM yyyy"
         return formatter.string(from: date)
     }
 
     private func dateTitle(for date: Date) -> String {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "M月d日"
+        formatter.locale = Locale(identifier: language.localeIdentifier)
+        formatter.dateFormat = language == .chinese ? "M月d日" : "MMM d"
         return formatter.string(from: date)
     }
 
     private func timeTitle(for date: Date) -> String {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.locale = Locale(identifier: language.localeIdentifier)
         formatter.dateFormat = "HH:mm"
         return formatter.string(from: date)
     }

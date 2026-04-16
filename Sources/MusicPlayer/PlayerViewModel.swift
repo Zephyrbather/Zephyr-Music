@@ -73,6 +73,7 @@ private struct PersistedPlaybackState: Codable {
 private struct PersistedAppState: Codable {
     let playlists: [PersistedPlaylistCollection]
     let selectedPlaylistID: UUID
+    let appLanguage: String?
     let playbackMode: String
     let interfaceMode: String
     let volume: Float
@@ -95,6 +96,11 @@ private struct PersistedAppState: Codable {
 private struct PersistedQueuedTrack: Codable {
     let playlistID: UUID
     let trackPath: String
+}
+
+private struct PersistedSecurityScopedBookmark: Codable {
+    let path: String
+    let data: Data
 }
 
 struct ListeningHistoryRecord: Codable, Identifiable {
@@ -141,6 +147,13 @@ struct YearlyListeningSummary: Identifiable {
 
 @MainActor
 final class PlayerViewModel: NSObject, ObservableObject {
+    enum AppLanguage: String, CaseIterable, Identifiable {
+        case chinese = "zh-Hans"
+        case english = "en"
+
+        var id: String { rawValue }
+    }
+
     enum AppTheme: String, CaseIterable, Identifiable {
         case system = "跟随系统"
         case pureBlack = "纯黑"
@@ -204,18 +217,38 @@ final class PlayerViewModel: NSObject, ObservableObject {
     }
 
     enum EqualizerPreset: String, CaseIterable, Identifiable {
-        case custom = "自定义"
-        case vocal = "人声增强"
-        case bassBoost = "低音增强"
-        case pop = "流行"
-        case rock = "摇滚"
-        case classical = "古典"
+        case custom = "custom"
+        case vocal = "vocal"
+        case bassBoost = "bass_boost"
+        case pop = "pop"
+        case rock = "rock"
+        case classical = "classical"
 
         var id: String { rawValue }
+
+        init(persistedValue: String) {
+            switch persistedValue {
+            case "自定义", "custom":
+                self = .custom
+            case "人声增强", "vocal":
+                self = .vocal
+            case "低音增强", "bass_boost":
+                self = .bassBoost
+            case "流行", "pop":
+                self = .pop
+            case "摇滚", "rock":
+                self = .rock
+            case "古典", "classical":
+                self = .classical
+            default:
+                self = .custom
+            }
+        }
     }
 
     private static let supportedExtensions = Set(["flac", "wav", "mp3", "dsf", "dff", "dsd"])
     private static let defaultPlaylistName = "默认歌单"
+    private static let defaultPlaylistEnglishName = "Default Playlist"
 
     @Published private(set) var playlists: [PlaylistCollection] = [PlaylistCollection(name: defaultPlaylistName)]
     @Published private(set) var queuedTrackPaths: [String] = []
@@ -237,6 +270,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
     @Published var desktopLyricsBackgroundStyle: DesktopLyricsBackgroundStyle = .themed
     @Published var playbackMode: PlaybackMode = .sequential
     @Published var interfaceMode: InterfaceMode = .compact
+    @Published var appLanguage: AppLanguage = .chinese
     @Published var playlistSearchFocusRequest = 0
     @Published var listeningHistoryPresentationRequest = 0
     @Published var appTheme: AppTheme = .system
@@ -272,9 +306,12 @@ final class PlayerViewModel: NSObject, ObservableObject {
     private var artworkTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
     private var isRestoringState = false
+    private var securityScopedBookmarks: [String: Data] = [:]
+    private var activeSecurityScopedURLs: [String: URL] = [:]
 
     private static let appStateDefaultsKey = "ZephyrPlayer.AppState"
     private static let listeningHistoryDefaultsKey = "ZephyrPlayer.ListeningHistory"
+    private static let securityScopedBookmarksDefaultsKey = "ZephyrPlayer.SecurityScopedBookmarks"
 
     override init() {
         let defaultPlaylist = PlaylistCollection(name: Self.defaultPlaylistName)
@@ -282,6 +319,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
         _selectedPlaylistID = Published(initialValue: defaultPlaylist.id)
         super.init()
         restoreListeningHistory()
+        restoreSecurityScopedBookmarks()
         configureAudioEngine()
         playerNode.volume = volume
         restorePersistedState()
@@ -302,7 +340,14 @@ final class PlayerViewModel: NSObject, ObservableObject {
     }
 
     var selectedPlaylistName: String {
-        currentPlaylist.name
+        displayName(for: currentPlaylist)
+    }
+
+    func displayName(for playlist: PlaylistCollection) -> String {
+        if Self.localizedDefaultPlaylistNames.contains(playlist.name) {
+            return appLanguage == .english ? Self.defaultPlaylistEnglishName : Self.defaultPlaylistName
+        }
+        return playlist.name
     }
 
     var progress: Double {
@@ -398,6 +443,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
     deinit {
         timerCancellable?.cancel()
         audioEngine.stop()
+        activeSecurityScopedURLs.values.forEach { $0.stopAccessingSecurityScopedResource() }
     }
 
     func openFiles() {
@@ -467,6 +513,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
     }
 
     func addFiles(_ urls: [URL]) {
+        persistSecurityScopedAccess(for: urls.filter { !$0.hasDirectoryPath })
         let tracks = urls
             .filter { Self.supportedExtensions.contains($0.pathExtension.lowercased()) }
             .map { AudioTrack(url: $0) }
@@ -475,6 +522,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
     }
 
     func addDirectories(_ urls: [URL]) {
+        persistSecurityScopedAccess(for: urls.filter(\.hasDirectoryPath))
         let tracks = urls.flatMap(scanDirectory)
         appendTracks(tracks)
     }
@@ -482,6 +530,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
     func handleDroppedURLs(_ urls: [URL]) {
         let files = urls.filter { Self.supportedExtensions.contains($0.pathExtension.lowercased()) }
         let directories = urls.filter { isDirectory($0) }
+        persistSecurityScopedAccess(for: files + directories)
         if !files.isEmpty {
             addFiles(files)
         }
@@ -1076,6 +1125,14 @@ final class PlayerViewModel: NSObject, ObservableObject {
             }
             .store(in: &cancellables)
 
+        $appLanguage
+            .dropFirst()
+            .debounce(for: .milliseconds(150), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.persistAppState()
+            }
+            .store(in: &cancellables)
+
         Publishers.CombineLatest4($volume, $isDesktopLyricsVisible, $desktopLyricsFontSize, $desktopLyricsOpacity)
             .dropFirst()
             .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
@@ -1151,6 +1208,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
             selectedPlaylistID = firstID
         }
 
+        appLanguage = AppLanguage(rawValue: persisted.appLanguage ?? AppLanguage.chinese.rawValue) ?? .chinese
         playbackMode = PlaybackMode(rawValue: persisted.playbackMode) ?? .sequential
         interfaceMode = InterfaceMode(rawValue: persisted.interfaceMode) ?? .compact
         volume = persisted.volume
@@ -1162,7 +1220,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
         desktopLyricsBackgroundStyle = DesktopLyricsBackgroundStyle(rawValue: persisted.desktopLyricsBackgroundStyle) ?? .themed
         isEqualizerEnabled = persisted.isEqualizerEnabled
         isEqualizerExpanded = persisted.isEqualizerExpanded
-        selectedEqualizerPreset = EqualizerPreset(rawValue: persisted.selectedEqualizerPreset) ?? .custom
+        selectedEqualizerPreset = EqualizerPreset(persistedValue: persisted.selectedEqualizerPreset)
         appTheme = AppTheme(rawValue: persisted.appTheme) ?? .system
         if persisted.equalizerGains.count == equalizerBands.count {
             equalizerBands = zip(equalizerBands, persisted.equalizerGains).map { band, gain in
@@ -1228,6 +1286,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
         let state = PersistedAppState(
             playlists: playlists.map(PersistedPlaylistCollection.init),
             selectedPlaylistID: selectedPlaylistID,
+            appLanguage: appLanguage.rawValue,
             playbackMode: playbackMode.rawValue,
             interfaceMode: interfaceMode.rawValue,
             volume: volume,
@@ -1251,6 +1310,93 @@ final class PlayerViewModel: NSObject, ObservableObject {
 
         guard let data = try? JSONEncoder().encode(state) else { return }
         UserDefaults.standard.set(data, forKey: Self.appStateDefaultsKey)
+    }
+
+    private func restoreSecurityScopedBookmarks() {
+        guard let data = UserDefaults.standard.data(forKey: Self.securityScopedBookmarksDefaultsKey),
+              let bookmarks = try? JSONDecoder().decode([PersistedSecurityScopedBookmark].self, from: data) else {
+            return
+        }
+
+        securityScopedBookmarks = Dictionary(uniqueKeysWithValues: bookmarks.map { ($0.path, $0.data) })
+
+        var updatedBookmarks = securityScopedBookmarks
+        var didUpdate = false
+
+        for (path, bookmarkData) in securityScopedBookmarks {
+            var isStale = false
+            guard let url = try? URL(
+                resolvingBookmarkData: bookmarkData,
+                options: [.withSecurityScope, .withoutUI],
+                relativeTo: nil,
+                bookmarkDataIsStale: &isStale
+            ) else {
+                updatedBookmarks.removeValue(forKey: path)
+                didUpdate = true
+                continue
+            }
+
+            if url.startAccessingSecurityScopedResource() {
+                activeSecurityScopedURLs[path] = url
+            }
+
+            if isStale,
+               let refreshedBookmark = try? url.bookmarkData(
+                options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+               ) {
+                updatedBookmarks[path] = refreshedBookmark
+                didUpdate = true
+            }
+        }
+
+        securityScopedBookmarks = updatedBookmarks
+        if didUpdate {
+            saveSecurityScopedBookmarks()
+        }
+    }
+
+    private func persistSecurityScopedAccess(for urls: [URL]) {
+        guard !urls.isEmpty else { return }
+
+        var didUpdate = false
+
+        for url in urls {
+            let normalized = normalizedPath(for: url)
+            let bookmarkOwner = url.standardizedFileURL
+
+            if activeSecurityScopedURLs[normalized] == nil, bookmarkOwner.startAccessingSecurityScopedResource() {
+                activeSecurityScopedURLs[normalized] = bookmarkOwner
+            }
+
+            guard let bookmarkData = try? bookmarkOwner.bookmarkData(
+                options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            ) else {
+                continue
+            }
+
+            if securityScopedBookmarks[normalized] != bookmarkData {
+                securityScopedBookmarks[normalized] = bookmarkData
+                didUpdate = true
+            }
+        }
+
+        if didUpdate {
+            saveSecurityScopedBookmarks()
+        }
+    }
+
+    private func saveSecurityScopedBookmarks() {
+        let payload = securityScopedBookmarks.map {
+            PersistedSecurityScopedBookmark(path: $0.key, data: $0.value)
+        }
+        .sorted { $0.path < $1.path }
+
+        guard let data = try? JSONEncoder().encode(payload) else { return }
+        UserDefaults.standard.set(data, forKey: Self.securityScopedBookmarksDefaultsKey)
     }
 
     private func startLyricsLoad(for track: AudioTrack, duration: TimeInterval) {
@@ -1416,7 +1562,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
     }
 
     private func nextPlaylistName() -> String {
-        let base = "新建歌单"
+        let base = appLanguage == .english ? "New Playlist" : "新建歌单"
         var counter = 1
         while playlists.contains(where: { $0.name == "\(base) \(counter)" }) {
             counter += 1
@@ -1475,4 +1621,9 @@ final class PlayerViewModel: NSObject, ObservableObject {
         formatter.dateFormat = "yyyy年M月"
         return formatter
     }()
+
+    private static let localizedDefaultPlaylistNames: Set<String> = [
+        defaultPlaylistName,
+        defaultPlaylistEnglishName
+    ]
 }

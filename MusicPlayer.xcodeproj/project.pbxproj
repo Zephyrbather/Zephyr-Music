@@ -17,6 +17,7 @@
 		A00000000000000000000028 /* OnlineMetadataService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000019 /* OnlineMetadataService.swift */; };
 		A00000000000000000000029 /* AudioAssetLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001A /* AudioAssetLoader.swift */; };
 		A0000000000000000000002A /* DesktopLyricsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001B /* DesktopLyricsWindowController.swift */; };
+		A0000000000000000000002B /* AppLanguageSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001C /* AppLanguageSupport.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -32,6 +33,7 @@
 		A00000000000000000000019 /* OnlineMetadataService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnlineMetadataService.swift; sourceTree = "<group>"; };
 		A0000000000000000000001A /* AudioAssetLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioAssetLoader.swift; sourceTree = "<group>"; };
 		A0000000000000000000001B /* DesktopLyricsWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopLyricsWindowController.swift; sourceTree = "<group>"; };
+		A0000000000000000000001C /* AppLanguageSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLanguageSupport.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -108,6 +110,7 @@
 			sourceTree = "<group>";
 			children = (
 				A0000000000000000000001A /* AudioAssetLoader.swift */,
+				A0000000000000000000001C /* AppLanguageSupport.swift */,
 				A00000000000000000000011 /* AudioTrack.swift */,
 				A00000000000000000000012 /* ContentView.swift */,
 				A0000000000000000000001B /* DesktopLyricsWindowController.swift */,
@@ -189,6 +192,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A00000000000000000000021 /* AudioTrack.swift in Sources */,
+				A0000000000000000000002B /* AppLanguageSupport.swift in Sources */,
 				A00000000000000000000029 /* AudioAssetLoader.swift in Sources */,
 				A00000000000000000000022 /* ContentView.swift in Sources */,
 				A0000000000000000000002A /* DesktopLyricsWindowController.swift in Sources */,
