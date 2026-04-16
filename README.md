@@ -30,7 +30,7 @@ Zephyr Player 是一个面向 macOS 的原生本地音乐播放器，基于 `Swi
 ### 使用 Xcode
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Zephyrbather/Zephyr-Music.git
 cd music
 open MusicPlayer.xcodeproj
 ```
