@@ -44,6 +44,29 @@
 		};
 /* End PBXFrameworksBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		A00000000000000000000034 /* Copy App to Downloads */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(TARGET_BUILD_DIR)/$(FULL_PRODUCT_NAME)",
+			);
+			name = "Copy App to Downloads";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(HOME)/Downloads/$(FULL_PRODUCT_NAME)",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\nTARGET_PATH=\"$TARGET_BUILD_DIR/$FULL_PRODUCT_NAME\"\nDEST_PATH=\"$HOME/Downloads/$FULL_PRODUCT_NAME\"\nrm -rf \"$DEST_PATH\"\ncp -R \"$TARGET_PATH\" \"$DEST_PATH\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXGroup section */
 		A00000000000000000000041 = {
 			isa = PBXGroup;
@@ -105,6 +128,7 @@
 				A00000000000000000000032 /* Sources */,
 				A00000000000000000000031 /* Frameworks */,
 				A00000000000000000000033 /* Resources */,
+				A00000000000000000000034 /* Copy App to Downloads */,
 			);
 			buildRules = (
 			);
