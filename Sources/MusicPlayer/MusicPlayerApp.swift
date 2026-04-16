@@ -1,5 +1,19 @@
 import SwiftUI
 
+private struct DefaultMenuCleanupCommands: Commands {
+    var body: some Commands {
+        CommandGroup(replacing: .undoRedo) { }
+        CommandGroup(replacing: .pasteboard) { }
+        CommandGroup(replacing: .textEditing) { }
+        CommandGroup(replacing: .textFormatting) { }
+        CommandGroup(replacing: .toolbar) { }
+        CommandGroup(replacing: .sidebar) { }
+        CommandGroup(replacing: .appVisibility) { }
+        CommandGroup(replacing: .windowSize) { }
+        CommandGroup(replacing: .windowArrangement) { }
+    }
+}
+
 @main
 struct MusicPlayerApp: App {
     @StateObject private var viewModel = PlayerViewModel()
@@ -131,6 +145,7 @@ struct MusicPlayerApp: App {
         }
 
         .commands {
+            DefaultMenuCleanupCommands()
             CommandGroup(after: .newItem) {
                 Button(language.pick("添加音频文件", "Add Audio Files")) {
                     viewModel.openFiles()

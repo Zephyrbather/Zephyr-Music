@@ -11,26 +11,14 @@ struct TrackAssetMetadata {
 enum AudioAssetLoader {
     static func loadLyrics(for url: URL) async -> LyricsDocument {
         let asset = AVURLAsset(url: url)
+        return await loadLyrics(from: asset)
+    }
 
-        if let directLyrics = try? await asset.load(.lyrics),
-           let document = lyricsDocument(from: directLyrics),
-           !document.isEmpty {
-            return document
-        }
-
-        let formats = (try? await asset.load(.availableMetadataFormats)) ?? []
-        for format in formats {
-            let items = (try? await asset.loadMetadata(for: format)) ?? []
-            for item in items {
-                if let candidate = await lyricCandidate(from: item),
-                   let document = lyricsDocument(from: candidate),
-                   !document.isEmpty {
-                    return document
-                }
-            }
-        }
-
-        return LyricsDocument(timedLines: [], plainText: nil)
+    static func loadLyricsAndArtwork(for url: URL) async -> (lyrics: LyricsDocument, artwork: NSImage?) {
+        let asset = AVURLAsset(url: url)
+        async let lyrics = loadLyrics(from: asset)
+        async let artwork = loadArtwork(from: asset)
+        return await (lyrics, artwork)
     }
 
     static func loadMetadata(for url: URL) async -> TrackAssetMetadata {
@@ -65,6 +53,33 @@ enum AudioAssetLoader {
 
     static func loadArtwork(for url: URL) async -> NSImage? {
         let asset = AVURLAsset(url: url)
+        return await loadArtwork(from: asset)
+    }
+
+    private static func loadLyrics(from asset: AVURLAsset) async -> LyricsDocument {
+
+        if let directLyrics = try? await asset.load(.lyrics),
+           let document = lyricsDocument(from: directLyrics),
+           !document.isEmpty {
+            return document
+        }
+
+        let formats = (try? await asset.load(.availableMetadataFormats)) ?? []
+        for format in formats {
+            let items = (try? await asset.loadMetadata(for: format)) ?? []
+            for item in items {
+                if let candidate = await lyricCandidate(from: item),
+                   let document = lyricsDocument(from: candidate),
+                   !document.isEmpty {
+                    return document
+                }
+            }
+        }
+
+        return LyricsDocument(timedLines: [], plainText: nil)
+    }
+
+    private static func loadArtwork(from asset: AVURLAsset) async -> NSImage? {
         let items = (try? await asset.load(.commonMetadata)) ?? []
 
         for item in items where item.commonKey?.rawValue == AVMetadataKey.commonKeyArtwork.rawValue {

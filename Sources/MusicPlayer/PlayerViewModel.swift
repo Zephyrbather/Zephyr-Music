@@ -302,8 +302,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
     private var scheduledPlaybackToken = UUID()
     private var timerCancellable: AnyCancellable?
     private var wasPlayingBeforeDrag = false
-    private var lyricsTask: Task<Void, Never>?
-    private var artworkTask: Task<Void, Never>?
+    private var supplementalAssetTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
     private var isRestoringState = false
     private var securityScopedBookmarks: [String: Data] = [:]
@@ -824,8 +823,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
             currentTime = clampedTime
 
             schedulePlayback(from: currentFramePosition, playImmediately: autoPlay)
-            startLyricsLoad(for: track, duration: duration)
-            startArtworkLoad(for: track)
+            startSupplementalAssetLoad(for: track, duration: duration)
             if recordHistory, autoPlay {
                 appendListeningHistory(for: track)
             }
@@ -860,10 +858,8 @@ final class PlayerViewModel: NSObject, ObservableObject {
         lyrics = LyricsDocument(timedLines: [], plainText: nil)
         currentLyricIndex = nil
         currentArtwork = nil
-        lyricsTask?.cancel()
-        lyricsTask = nil
-        artworkTask?.cancel()
-        artworkTask = nil
+        supplementalAssetTask?.cancel()
+        supplementalAssetTask = nil
         if clearSelection {
             currentIndex = nil
             currentPlayingPlaylistID = nil
@@ -1399,16 +1395,16 @@ final class PlayerViewModel: NSObject, ObservableObject {
         UserDefaults.standard.set(data, forKey: Self.securityScopedBookmarksDefaultsKey)
     }
 
-    private func startLyricsLoad(for track: AudioTrack, duration: TimeInterval) {
-        lyricsTask?.cancel()
-        lyricsTask = Task { [weak self] in
+    private func startSupplementalAssetLoad(for track: AudioTrack, duration: TimeInterval) {
+        supplementalAssetTask?.cancel()
+        supplementalAssetTask = Task { [weak self] in
             guard let self else { return }
 
-            let embeddedLyrics = await AudioAssetLoader.loadLyrics(for: track.url)
+            let embeddedAssets = await AudioAssetLoader.loadLyricsAndArtwork(for: track.url)
             guard !Task.isCancelled, self.currentTrack?.url == track.url else { return }
 
-            if !embeddedLyrics.isEmpty {
-                self.lyrics = embeddedLyrics
+            if !embeddedAssets.lyrics.isEmpty {
+                self.lyrics = embeddedAssets.lyrics
                 self.refreshCurrentLyricIndex()
             } else {
                 let sidecarLyrics = LyricsParser.loadLyrics(for: track)
@@ -1418,42 +1414,33 @@ final class PlayerViewModel: NSObject, ObservableObject {
                 }
             }
 
-            guard self.lyrics.isEmpty else { return }
+            if let artwork = embeddedAssets.artwork {
+                self.currentArtwork = artwork
+            }
 
-            let info = TrackSearchInfo(
+            let lyricsInfo = TrackSearchInfo(
                 title: track.title,
                 artist: track.artist,
                 album: track.album,
                 duration: duration
             )
 
-            if let fetchedLyrics = await OnlineMetadataService.shared.fetchLyrics(for: track, info: info),
+            if self.lyrics.isEmpty,
+               let fetchedLyrics = await OnlineMetadataService.shared.fetchLyrics(for: track, info: lyricsInfo),
                !Task.isCancelled,
                self.currentTrack?.url == track.url {
                 self.lyrics = fetchedLyrics
                 self.refreshCurrentLyricIndex()
             }
-        }
-    }
 
-    private func startArtworkLoad(for track: AudioTrack) {
-        artworkTask?.cancel()
-        artworkTask = Task { [weak self] in
-            guard let self else { return }
-            if let image = await AudioAssetLoader.loadArtwork(for: track.url),
-               !Task.isCancelled,
-               self.currentTrack?.url == track.url {
-                self.currentArtwork = image
-            }
-
-            let info = TrackSearchInfo(
+            let artworkInfo = TrackSearchInfo(
                 title: track.title,
                 artist: track.artist,
                 album: track.album,
                 duration: self.duration
             )
             if self.currentArtwork == nil,
-               let fetchedArtwork = await OnlineMetadataService.shared.fetchArtwork(for: track, info: info),
+               let fetchedArtwork = await OnlineMetadataService.shared.fetchArtwork(for: track, info: artworkInfo),
                !Task.isCancelled,
                self.currentTrack?.url == track.url {
                 self.currentArtwork = fetchedArtwork
