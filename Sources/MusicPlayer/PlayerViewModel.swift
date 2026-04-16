@@ -1,0 +1,1478 @@
+import AppKit
+import AVFoundation
+import Combine
+import Foundation
+import UniformTypeIdentifiers
+
+struct EqualizerBandSetting: Identifiable, Equatable {
+    let id: Int
+    let frequency: Float
+    let label: String
+    var gain: Float
+}
+
+struct PlaylistCollection: Identifiable, Equatable {
+    let id: UUID
+    var name: String
+    var tracks: [AudioTrack]
+
+    init(id: UUID = UUID(), name: String, tracks: [AudioTrack] = []) {
+        self.id = id
+        self.name = name
+        self.tracks = tracks
+    }
+}
+
+private struct PersistedAudioTrack: Codable {
+    let urlPath: String
+    let title: String?
+    let artist: String?
+    let album: String?
+
+    init(track: AudioTrack) {
+        urlPath = track.url.path
+        title = track.title
+        artist = track.artist
+        album = track.album
+    }
+
+    var resolvedTrack: AudioTrack {
+        AudioTrack(
+            url: URL(fileURLWithPath: urlPath),
+            title: title,
+            artist: artist,
+            album: album
+        )
+    }
+}
+
+private struct PersistedPlaylistCollection: Codable {
+    let id: UUID
+    let name: String
+    let tracks: [PersistedAudioTrack]
+
+    init(playlist: PlaylistCollection) {
+        id = playlist.id
+        name = playlist.name
+        tracks = playlist.tracks.map(PersistedAudioTrack.init)
+    }
+
+    var resolvedPlaylist: PlaylistCollection {
+        PlaylistCollection(id: id, name: name, tracks: tracks.map(\.resolvedTrack))
+    }
+}
+
+private struct PersistedPlaybackState: Codable {
+    let selectedPlaylistID: UUID?
+    let currentPlayingPlaylistID: UUID?
+    let currentTrackPath: String?
+    let currentTime: TimeInterval
+    let wasPlaying: Bool
+}
+
+private struct PersistedAppState: Codable {
+    let playlists: [PersistedPlaylistCollection]
+    let selectedPlaylistID: UUID
+    let playbackMode: String
+    let interfaceMode: String
+    let volume: Float
+    let isDesktopLyricsVisible: Bool
+    let desktopLyricsFontSize: Double
+    let desktopLyricsOpacity: Double
+    let isDesktopLyricsLocked: Bool
+    let desktopLyricsDisplayMode: String
+    let desktopLyricsBackgroundStyle: String
+    let isEqualizerEnabled: Bool
+    let isEqualizerExpanded: Bool
+    let selectedEqualizerPreset: String
+    let equalizerGains: [Float]
+    let appTheme: String
+    let customBackgroundImagePath: String?
+    let queuedTracks: [PersistedQueuedTrack]?
+    let playbackState: PersistedPlaybackState
+}
+
+private struct PersistedQueuedTrack: Codable {
+    let playlistID: UUID
+    let trackPath: String
+}
+
+struct ListeningHistoryRecord: Codable, Identifiable {
+    let id: UUID
+    let trackPath: String
+    let title: String
+    let artist: String?
+    let album: String?
+    let playedAt: Date
+
+    init(track: AudioTrack, playedAt: Date = Date()) {
+        id = UUID()
+        trackPath = track.url.path
+        title = track.title
+        artist = track.artist
+        album = track.album
+        self.playedAt = playedAt
+    }
+}
+
+struct ListeningTrackSummary: Identifiable {
+    let id: String
+    let trackPath: String
+    let title: String
+    let artist: String?
+    let album: String?
+    let playCount: Int
+    let lastPlayedAt: Date
+}
+
+struct MonthlyListeningSummary: Identifiable {
+    let id: String
+    let monthStart: Date
+    let totalPlays: Int
+    let tracks: [ListeningTrackSummary]
+}
+
+struct YearlyListeningSummary: Identifiable {
+    let id: String
+    let year: Int
+    let totalPlays: Int
+    let tracks: [ListeningTrackSummary]
+}
+
+@MainActor
+final class PlayerViewModel: NSObject, ObservableObject {
+    enum AppTheme: String, CaseIterable, Identifiable {
+        case system = "跟随系统"
+        case pureBlack = "纯黑"
+        case pureWhite = "纯白"
+        case pastelBlue = "淡蓝"
+        case pastelPurple = "淡紫"
+        case pastelGreen = "淡绿"
+        case customImage = "自定义图片"
+
+        var id: String { rawValue }
+    }
+
+    enum DesktopLyricsDisplayMode: String, CaseIterable, Identifiable {
+        case currentOnly = "当前一句"
+        case dualLine = "两句横排"
+        case threeLines = "三句模式"
+
+        var id: String { rawValue }
+    }
+
+    enum DesktopLyricsBackgroundStyle: String, CaseIterable, Identifiable {
+        case themed = "主题色背景"
+        case transparent = "纯透明背景"
+
+        var id: String { rawValue }
+    }
+
+    enum PlaybackMode: String, CaseIterable, Identifiable {
+        case sequential = "顺序播放"
+        case listLoop = "循环播放"
+        case shuffle = "随机播放"
+
+        var id: String { rawValue }
+
+        var symbolName: String {
+            switch self {
+            case .sequential:
+                return "list.number"
+            case .listLoop:
+                return "repeat"
+            case .shuffle:
+                return "shuffle"
+            }
+        }
+    }
+
+    enum InterfaceMode: String, CaseIterable, Identifiable {
+        case full = "完整模式"
+        case compact = "简洁模式"
+
+        var id: String { rawValue }
+
+        var symbolName: String {
+            switch self {
+            case .full:
+                return "rectangle.split.2x1"
+            case .compact:
+                return "rectangle.portrait"
+            }
+        }
+    }
+
+    enum EqualizerPreset: String, CaseIterable, Identifiable {
+        case custom = "自定义"
+        case vocal = "人声增强"
+        case bassBoost = "低音增强"
+        case pop = "流行"
+        case rock = "摇滚"
+        case classical = "古典"
+
+        var id: String { rawValue }
+    }
+
+    private static let supportedExtensions = Set(["flac", "wav", "mp3", "dsf", "dff", "dsd"])
+    private static let defaultPlaylistName = "默认歌单"
+
+    @Published private(set) var playlists: [PlaylistCollection] = [PlaylistCollection(name: defaultPlaylistName)]
+    @Published private(set) var queuedTrackPaths: [String] = []
+    @Published var selectedPlaylistID: UUID
+    @Published private(set) var currentIndex: Int?
+    @Published private(set) var currentPlayingPlaylistID: UUID?
+    @Published private(set) var isPlaying = false
+    @Published private(set) var duration: TimeInterval = 0
+    @Published private(set) var currentTime: TimeInterval = 0
+    @Published private(set) var lyrics = LyricsDocument(timedLines: [], plainText: nil)
+    @Published private(set) var currentLyricIndex: Int?
+    @Published private(set) var currentArtwork: NSImage?
+    @Published var isDropTargeted = false
+    @Published var isDesktopLyricsVisible = false
+    @Published var desktopLyricsFontSize: Double = 28
+    @Published var desktopLyricsOpacity: Double = 0.9
+    @Published var isDesktopLyricsLocked = false
+    @Published var desktopLyricsDisplayMode: DesktopLyricsDisplayMode = .dualLine
+    @Published var desktopLyricsBackgroundStyle: DesktopLyricsBackgroundStyle = .themed
+    @Published var playbackMode: PlaybackMode = .sequential
+    @Published var interfaceMode: InterfaceMode = .compact
+    @Published var playlistSearchFocusRequest = 0
+    @Published var listeningHistoryPresentationRequest = 0
+    @Published var appTheme: AppTheme = .system
+    @Published private(set) var customBackgroundImage: NSImage?
+    @Published private(set) var customBackgroundImagePath: String?
+    @Published var isEqualizerEnabled = false {
+        didSet { applyEqualizerSettings() }
+    }
+    @Published var isEqualizerExpanded = false
+    @Published var selectedEqualizerPreset: EqualizerPreset = .custom
+    @Published var equalizerBands = PlayerViewModel.makeDefaultEqualizerBands() {
+        didSet { applyEqualizerSettings() }
+    }
+    @Published private(set) var listeningHistory: [ListeningHistoryRecord] = []
+    @Published var volume: Float = 0.8 {
+        didSet {
+            playerNode.volume = volume
+        }
+    }
+
+    private let audioEngine = AVAudioEngine()
+    private let playerNode = AVAudioPlayerNode()
+    private let equalizerNode = AVAudioUnitEQ(numberOfBands: 10)
+
+    private var currentAudioFile: AVAudioFile?
+    private var currentSampleRate: Double = 44_100
+    private var currentStartFrame: AVAudioFramePosition = 0
+    private var currentFramePosition: AVAudioFramePosition = 0
+    private var scheduledPlaybackToken = UUID()
+    private var timerCancellable: AnyCancellable?
+    private var wasPlayingBeforeDrag = false
+    private var lyricsTask: Task<Void, Never>?
+    private var artworkTask: Task<Void, Never>?
+    private var cancellables = Set<AnyCancellable>()
+    private var isRestoringState = false
+
+    private static let appStateDefaultsKey = "ZephyrPlayer.AppState"
+    private static let listeningHistoryDefaultsKey = "ZephyrPlayer.ListeningHistory"
+
+    override init() {
+        let defaultPlaylist = PlaylistCollection(name: Self.defaultPlaylistName)
+        _playlists = Published(initialValue: [defaultPlaylist])
+        _selectedPlaylistID = Published(initialValue: defaultPlaylist.id)
+        super.init()
+        restoreListeningHistory()
+        configureAudioEngine()
+        playerNode.volume = volume
+        restorePersistedState()
+        applyEqualizerSettings()
+        configurePersistence()
+        startProgressTimer()
+    }
+
+    var currentTrack: AudioTrack? {
+        guard let currentIndex else { return nil }
+        guard let currentPlayingPlaylist else { return nil }
+        guard currentPlayingPlaylist.tracks.indices.contains(currentIndex) else { return nil }
+        return currentPlayingPlaylist.tracks[currentIndex]
+    }
+
+    var playlist: [AudioTrack] {
+        currentPlaylist.tracks
+    }
+
+    var selectedPlaylistName: String {
+        currentPlaylist.name
+    }
+
+    var progress: Double {
+        guard duration > 0 else { return 0 }
+        return currentTime / duration
+    }
+
+    var monthlyListeningSummaries: [MonthlyListeningSummary] {
+        let calendar = Calendar(identifier: .gregorian)
+        let groupedByMonth = Dictionary(grouping: listeningHistory) {
+            calendar.date(from: calendar.dateComponents([.year, .month], from: $0.playedAt)) ?? $0.playedAt
+        }
+
+        return groupedByMonth
+            .map { month, records in
+                let groupedTracks = Dictionary(grouping: records, by: \.trackPath)
+                let trackSummaries = groupedTracks.compactMap { trackPath, groupedRecords -> ListeningTrackSummary? in
+                    guard let latest = groupedRecords.max(by: { $0.playedAt < $1.playedAt }) else { return nil }
+                    return ListeningTrackSummary(
+                        id: month.formatted(date: .numeric, time: .omitted) + trackPath,
+                        trackPath: trackPath,
+                        title: latest.title,
+                        artist: latest.artist,
+                        album: latest.album,
+                        playCount: groupedRecords.count,
+                        lastPlayedAt: latest.playedAt
+                    )
+                }
+                .sorted {
+                    if $0.playCount == $1.playCount {
+                        return $0.lastPlayedAt > $1.lastPlayedAt
+                    }
+                    return $0.playCount > $1.playCount
+                }
+
+                return MonthlyListeningSummary(
+                    id: Self.monthFormatter.string(from: month),
+                    monthStart: month,
+                    totalPlays: records.count,
+                    tracks: trackSummaries
+                )
+            }
+            .sorted { $0.monthStart > $1.monthStart }
+    }
+
+    var yearlyListeningSummaries: [YearlyListeningSummary] {
+        let calendar = Calendar(identifier: .gregorian)
+        let groupedByYear = Dictionary(grouping: listeningHistory) {
+            calendar.component(.year, from: $0.playedAt)
+        }
+
+        return groupedByYear
+            .map { year, records in
+                let groupedTracks = Dictionary(grouping: records, by: \.trackPath)
+                let trackSummaries = groupedTracks.compactMap { trackPath, groupedRecords -> ListeningTrackSummary? in
+                    guard let latest = groupedRecords.max(by: { $0.playedAt < $1.playedAt }) else { return nil }
+                    return ListeningTrackSummary(
+                        id: "\(year)-" + trackPath,
+                        trackPath: trackPath,
+                        title: latest.title,
+                        artist: latest.artist,
+                        album: latest.album,
+                        playCount: groupedRecords.count,
+                        lastPlayedAt: latest.playedAt
+                    )
+                }
+                .sorted {
+                    if $0.playCount == $1.playCount {
+                        return $0.lastPlayedAt > $1.lastPlayedAt
+                    }
+                    return $0.playCount > $1.playCount
+                }
+
+                return YearlyListeningSummary(
+                    id: String(year),
+                    year: year,
+                    totalPlays: records.count,
+                    tracks: trackSummaries
+                )
+            }
+            .sorted { $0.year > $1.year }
+    }
+
+    var recentListeningRecords: [ListeningHistoryRecord] {
+        Array(listeningHistory.prefix(100))
+    }
+
+    func totalPlayCount(for track: AudioTrack) -> Int {
+        let path = normalizedPath(for: track.url)
+        return listeningHistory.filter { normalizedPath(forPath: $0.trackPath) == path }.count
+    }
+
+    deinit {
+        timerCancellable?.cancel()
+        audioEngine.stop()
+    }
+
+    func openFiles() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "flac"),
+            UTType(filenameExtension: "wav"),
+            UTType.mp3,
+            UTType(filenameExtension: "dsf"),
+            UTType(filenameExtension: "dff"),
+            UTType(filenameExtension: "dsd")
+        ].compactMap { $0 }
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+
+        if panel.runModal() == .OK {
+            addFiles(panel.urls)
+        }
+    }
+
+    func openFolder() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.folder]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+
+        if panel.runModal() == .OK {
+            addDirectories(panel.urls)
+        }
+    }
+
+    func addTracks(fromPlaylist sourcePlaylistID: UUID, to destinationPlaylistID: UUID? = nil) {
+        guard let sourcePlaylist = playlists.first(where: { $0.id == sourcePlaylistID }) else { return }
+        let targetPlaylistID = destinationPlaylistID ?? selectedPlaylistID
+        guard targetPlaylistID != sourcePlaylistID else { return }
+        guard let destinationIndex = playlists.firstIndex(where: { $0.id == targetPlaylistID }) else { return }
+
+        let existingPaths = Set(playlists[destinationIndex].tracks.map { normalizedPath(for: $0.url) })
+        let additions = sourcePlaylist.tracks.filter { !existingPaths.contains(normalizedPath(for: $0.url)) }
+        guard !additions.isEmpty else { return }
+
+        let startIndex = playlists[destinationIndex].tracks.count
+        playlists[destinationIndex].tracks.append(contentsOf: additions)
+        enrichMetadataForNewTracks(startingAt: startIndex, in: targetPlaylistID)
+    }
+
+    func openCustomBackgroundImage() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+
+        if panel.runModal() == .OK, let url = panel.url {
+            setCustomBackgroundImage(from: url)
+        }
+    }
+
+    func clearCustomBackgroundImage() {
+        customBackgroundImage = nil
+        customBackgroundImagePath = nil
+        if appTheme == .customImage {
+            appTheme = .system
+        }
+    }
+
+    func addFiles(_ urls: [URL]) {
+        let tracks = urls
+            .filter { Self.supportedExtensions.contains($0.pathExtension.lowercased()) }
+            .map { AudioTrack(url: $0) }
+
+        appendTracks(tracks)
+    }
+
+    func addDirectories(_ urls: [URL]) {
+        let tracks = urls.flatMap(scanDirectory)
+        appendTracks(tracks)
+    }
+
+    func handleDroppedURLs(_ urls: [URL]) {
+        let files = urls.filter { Self.supportedExtensions.contains($0.pathExtension.lowercased()) }
+        let directories = urls.filter { isDirectory($0) }
+        if !files.isEmpty {
+            addFiles(files)
+        }
+        if !directories.isEmpty {
+            addDirectories(directories)
+        }
+    }
+
+    func importItemProviders(_ providers: [NSItemProvider]) -> Bool {
+        let identifier = UTType.fileURL.identifier
+        let supported = providers.filter { $0.hasItemConformingToTypeIdentifier(identifier) }
+        guard !supported.isEmpty else { return false }
+
+        Task {
+            var urls: [URL] = []
+            for provider in supported {
+                if let url = await loadURL(from: provider) {
+                    urls.append(url)
+                }
+            }
+
+            handleDroppedURLs(urls)
+        }
+
+        return true
+    }
+
+    var previousLyricLine: String? {
+        guard let currentLyricIndex, currentLyricIndex > 0 else { return nil }
+        return lyrics.timedLines[currentLyricIndex - 1].text
+    }
+
+    var currentLyricLine: String? {
+        guard let currentLyricIndex, lyrics.timedLines.indices.contains(currentLyricIndex) else { return nil }
+        return lyrics.timedLines[currentLyricIndex].text
+    }
+
+    var nextLyricLine: String? {
+        guard let currentLyricIndex else { return nil }
+        let nextIndex = currentLyricIndex + 1
+        guard lyrics.timedLines.indices.contains(nextIndex) else { return nil }
+        return lyrics.timedLines[nextIndex].text
+    }
+
+    func updateEqualizerBandGain(at index: Int, gain: Float) {
+        guard equalizerBands.indices.contains(index) else { return }
+        if selectedEqualizerPreset != .custom {
+            selectedEqualizerPreset = .custom
+        }
+        equalizerBands[index].gain = gain
+    }
+
+    func resetEqualizer() {
+        selectedEqualizerPreset = .custom
+        equalizerBands = Self.makeDefaultEqualizerBands()
+    }
+
+    func applyEqualizerPreset(_ preset: EqualizerPreset) {
+        selectedEqualizerPreset = preset
+        equalizerBands = Self.equalizerBands(for: preset)
+    }
+
+    func createPlaylist() {
+        let name = nextPlaylistName()
+        let playlist = PlaylistCollection(name: name)
+        playlists.append(playlist)
+        selectedPlaylistID = playlist.id
+    }
+
+    func createPlaylist(named proposedName: String) {
+        let trimmed = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackName = nextPlaylistName()
+        let baseName = trimmed.isEmpty ? fallbackName : trimmed
+        let resolvedName = uniquePlaylistName(for: baseName)
+        let playlist = PlaylistCollection(name: resolvedName)
+        playlists.append(playlist)
+        selectedPlaylistID = playlist.id
+    }
+
+    func selectPlaylist(_ id: UUID) {
+        guard playlists.contains(where: { $0.id == id }) else { return }
+        selectedPlaylistID = id
+    }
+
+    func removeSelectedPlaylist() {
+        removePlaylist(id: selectedPlaylistID)
+    }
+
+    func removePlaylist(id: UUID) {
+        guard playlists.count > 1 else { return }
+        guard let playlistIndex = playlists.firstIndex(where: { $0.id == id }) else { return }
+
+        let removedPlaylist = playlists[playlistIndex]
+        let fallbackIndex = playlistIndex == 0 ? 1 : playlistIndex - 1
+        let fallbackPlaylistID = playlists[fallbackIndex].id
+
+        playlists.remove(at: playlistIndex)
+        playbackQueue.removeAll { $0.playlistID == removedPlaylist.id }
+
+        if selectedPlaylistID == removedPlaylist.id {
+            selectedPlaylistID = fallbackPlaylistID
+        }
+
+        if currentPlayingPlaylistID == removedPlaylist.id {
+            stopPlayback(clearSelection: true)
+        }
+    }
+
+    func cyclePlaybackMode() {
+        let modes = PlaybackMode.allCases
+        guard let current = modes.firstIndex(of: playbackMode) else {
+            playbackMode = .sequential
+            return
+        }
+        playbackMode = modes[(current + 1) % modes.count]
+    }
+
+    func toggleInterfaceMode() {
+        interfaceMode = interfaceMode == .full ? .compact : .full
+    }
+
+    func removeTracks(at offsets: IndexSet) {
+        guard let selectedPlaylistIndex else { return }
+        var updatedPlaylist = playlists[selectedPlaylistIndex]
+        let removedPaths = offsets.compactMap { index in
+            updatedPlaylist.tracks.indices.contains(index) ? normalizedPath(for: updatedPlaylist.tracks[index].url) : nil
+        }
+        let removedCurrent = currentIndex.map { offsets.contains($0) } ?? false
+        for index in offsets.sorted(by: >) {
+            if updatedPlaylist.tracks.indices.contains(index) {
+                updatedPlaylist.tracks.remove(at: index)
+            }
+        }
+        playlists[selectedPlaylistIndex] = updatedPlaylist
+        playbackQueue.removeAll { queued in
+            queued.playlistID == updatedPlaylist.id && removedPaths.contains(normalizedPath(forPath: queued.trackPath))
+        }
+
+        guard !updatedPlaylist.tracks.isEmpty else {
+            if currentPlayingPlaylistID == updatedPlaylist.id {
+                stopPlayback(clearSelection: true)
+            }
+            return
+        }
+
+        if removedCurrent, currentPlayingPlaylistID == updatedPlaylist.id {
+            let nextIndex = min(offsets.first ?? 0, playlist.count - 1)
+            playTrack(at: nextIndex, in: updatedPlaylist.id)
+            return
+        }
+
+        if let currentIndex, currentPlayingPlaylistID == updatedPlaylist.id {
+            let shift = offsets.filter { $0 < currentIndex }.count
+            self.currentIndex = currentIndex - shift
+        }
+    }
+
+    func playSelected(track: AudioTrack) {
+        guard let index = playlist.firstIndex(of: track) else { return }
+        playTrack(at: index, in: selectedPlaylistID)
+    }
+
+    func togglePlayback() {
+        if isPlaying {
+            pausePlayback()
+            return
+        }
+
+        if currentAudioFile != nil {
+            resumePlayback()
+        } else if !playlist.isEmpty {
+            playTrack(at: currentIndex ?? 0, in: selectedPlaylistID)
+        }
+    }
+
+    func playNext() {
+        if let queued = resolveNextQueuedTrack() {
+            playTrack(at: queued.trackIndex, in: queued.playlistID)
+            return
+        }
+        guard let currentPlayingPlaylist, !currentPlayingPlaylist.tracks.isEmpty else { return }
+        guard let nextIndex = resolvedNextIndex(autoAdvance: false) else { return }
+        playTrack(at: nextIndex, in: currentPlayingPlaylist.id)
+    }
+
+    func playPrevious() {
+        guard let currentPlayingPlaylist, !currentPlayingPlaylist.tracks.isEmpty else { return }
+        let previousIndex = resolvedPreviousIndex()
+        playTrack(at: previousIndex, in: currentPlayingPlaylist.id)
+    }
+
+    func seek(to progress: Double) {
+        guard duration > 0 else { return }
+        let clampedProgress = min(max(progress, 0), 1)
+        seekToTime(duration * clampedProgress)
+    }
+
+    func seekToTime(_ time: TimeInterval) {
+        guard let audioFile = currentAudioFile, duration > 0 else { return }
+
+        let clampedTime = min(max(time, 0), duration)
+        let targetFrame = AVAudioFramePosition(clampedTime * currentSampleRate)
+        let shouldResume = isPlaying
+
+        currentFramePosition = min(max(targetFrame, 0), audioFile.length)
+        currentTime = clampedTime
+        schedulePlayback(from: currentFramePosition, playImmediately: shouldResume)
+        refreshCurrentLyricIndex()
+    }
+
+    func beginScrubbing() {
+        wasPlayingBeforeDrag = isPlaying
+        if isPlaying {
+            pausePlayback()
+        }
+    }
+
+    func endScrubbing() {
+        if wasPlayingBeforeDrag {
+            resumePlayback()
+        }
+    }
+
+    func formatTime(_ seconds: TimeInterval) -> String {
+        guard seconds.isFinite else { return "00:00" }
+        let totalSeconds = Int(seconds.rounded(.down))
+        let minutes = totalSeconds / 60
+        let remainingSeconds = totalSeconds % 60
+        return String(format: "%02d:%02d", minutes, remainingSeconds)
+    }
+
+    func queueTrackNext(_ track: AudioTrack, in playlistID: UUID) {
+        guard let playlistIndex = playlists.firstIndex(where: { $0.id == playlistID }),
+              playlists[playlistIndex].tracks.contains(track) else { return }
+
+        let normalized = normalizedPath(for: track.url)
+        queuedTrackPaths.removeAll { $0 == normalized }
+        playbackQueue.removeAll {
+            $0.playlistID == playlistID && normalizedPath(forPath: $0.trackPath) == normalized
+        }
+        playbackQueue.append(QueuedTrack(playlistID: playlistID, trackPath: normalized))
+        queuedTrackPaths = playbackQueue.map(\.trackPath)
+    }
+
+    private func appendTracks(_ tracks: [AudioTrack]) {
+        guard !tracks.isEmpty else { return }
+        guard let selectedPlaylistIndex else { return }
+
+        let existingPaths = Set(playlists[selectedPlaylistIndex].tracks.map { normalizedPath(for: $0.url) })
+        let deduplicated = tracks
+            .filter { !existingPaths.contains(normalizedPath(for: $0.url)) }
+            .sorted { $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending }
+
+        guard !deduplicated.isEmpty else { return }
+
+        let shouldAutoplay = playlists[selectedPlaylistIndex].tracks.isEmpty && currentAudioFile == nil
+        let startIndex = playlists[selectedPlaylistIndex].tracks.count
+        playlists[selectedPlaylistIndex].tracks.append(contentsOf: deduplicated)
+        enrichMetadataForNewTracks(startingAt: startIndex, in: playlists[selectedPlaylistIndex].id)
+
+        if shouldAutoplay {
+            playTrack(at: 0, in: playlists[selectedPlaylistIndex].id)
+        }
+    }
+
+    private func playTrack(at index: Int, in playlistID: UUID) {
+        loadTrack(at: index, in: playlistID, startTime: 0, autoPlay: true, recordHistory: true)
+    }
+
+    private func loadTrack(at index: Int, in playlistID: UUID, startTime: TimeInterval, autoPlay: Bool, recordHistory: Bool) {
+        guard let playlistIndex = playlists.firstIndex(where: { $0.id == playlistID }) else { return }
+        let playlist = playlists[playlistIndex].tracks
+        guard playlist.indices.contains(index) else { return }
+
+        do {
+            let track = playlist[index]
+            let audioFile = try AVAudioFile(forReading: track.url)
+
+            currentAudioFile = audioFile
+            currentSampleRate = audioFile.processingFormat.sampleRate
+            duration = Double(audioFile.length) / currentSampleRate
+            currentPlayingPlaylistID = playlistID
+            currentIndex = index
+            isPlaying = false
+            lyrics = LyricsDocument(timedLines: [], plainText: nil)
+            currentLyricIndex = nil
+            currentArtwork = nil
+            let clampedTime = min(max(startTime, 0), duration)
+            let startFrame = AVAudioFramePosition(clampedTime * currentSampleRate)
+            currentFramePosition = min(max(startFrame, 0), audioFile.length)
+            currentTime = clampedTime
+
+            schedulePlayback(from: currentFramePosition, playImmediately: autoPlay)
+            startLyricsLoad(for: track, duration: duration)
+            startArtworkLoad(for: track)
+            if recordHistory, autoPlay {
+                appendListeningHistory(for: track)
+            }
+        } catch {
+            NSSound.beep()
+            print("播放音频文件失败: \(error)")
+        }
+    }
+
+    private func pausePlayback() {
+        guard currentAudioFile != nil else { return }
+        captureCurrentFramePosition()
+        invalidateScheduledCompletion()
+        playerNode.stop()
+        isPlaying = false
+    }
+
+    private func resumePlayback() {
+        guard currentAudioFile != nil else { return }
+        schedulePlayback(from: currentFramePosition, playImmediately: true)
+    }
+
+    private func stopPlayback(clearSelection: Bool = false) {
+        invalidateScheduledCompletion()
+        playerNode.stop()
+        currentAudioFile = nil
+        isPlaying = false
+        duration = 0
+        currentTime = 0
+        currentFramePosition = 0
+        currentStartFrame = 0
+        lyrics = LyricsDocument(timedLines: [], plainText: nil)
+        currentLyricIndex = nil
+        currentArtwork = nil
+        lyricsTask?.cancel()
+        lyricsTask = nil
+        artworkTask?.cancel()
+        artworkTask = nil
+        if clearSelection {
+            currentIndex = nil
+            currentPlayingPlaylistID = nil
+        }
+    }
+
+    private func startProgressTimer() {
+        timerCancellable = Timer.publish(every: 0.2, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                guard currentAudioFile != nil else {
+                    currentTime = 0
+                    return
+                }
+
+                if isPlaying {
+                    currentTime = currentPlaybackTime()
+                    currentFramePosition = currentPlaybackFrame()
+                } else {
+                    currentTime = Double(currentFramePosition) / currentSampleRate
+                }
+
+                currentTime = min(currentTime, duration)
+                refreshCurrentLyricIndex()
+            }
+    }
+
+    private func configureAudioEngine() {
+        audioEngine.attach(playerNode)
+        audioEngine.attach(equalizerNode)
+        audioEngine.connect(playerNode, to: equalizerNode, format: nil)
+        audioEngine.connect(equalizerNode, to: audioEngine.mainMixerNode, format: nil)
+
+        let frequencies: [Float] = [31, 62, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
+        let labels = ["31", "62", "125", "250", "500", "1K", "2K", "4K", "8K", "16K"]
+
+        for index in equalizerNode.bands.indices {
+            let band = equalizerNode.bands[index]
+            band.filterType = .parametric
+            band.frequency = frequencies[index]
+            band.bandwidth = 0.8
+            band.gain = 0
+            band.bypass = false
+        }
+
+        equalizerBands = zip(frequencies.indices, zip(frequencies, labels)).map { index, pair in
+            EqualizerBandSetting(id: index, frequency: pair.0, label: pair.1, gain: 0)
+        }
+
+        do {
+            try audioEngine.start()
+        } catch {
+            print("启动音频引擎失败: \(error)")
+        }
+    }
+
+    private func applyEqualizerSettings() {
+        equalizerNode.bypass = !isEqualizerEnabled
+
+        for (index, setting) in equalizerBands.enumerated() where equalizerNode.bands.indices.contains(index) {
+            let band = equalizerNode.bands[index]
+            band.gain = setting.gain
+            band.bypass = !isEqualizerEnabled
+        }
+    }
+
+    private func schedulePlayback(from frame: AVAudioFramePosition, playImmediately: Bool) {
+        guard let audioFile = currentAudioFile else { return }
+
+        let clampedFrame = min(max(frame, 0), audioFile.length)
+        let remainingFrames = audioFile.length - clampedFrame
+        currentFramePosition = clampedFrame
+        currentStartFrame = clampedFrame
+        currentTime = Double(clampedFrame) / currentSampleRate
+
+        invalidateScheduledCompletion()
+        playerNode.stop()
+
+        guard remainingFrames > 0 else {
+            isPlaying = false
+            return
+        }
+
+        let playbackToken = UUID()
+        scheduledPlaybackToken = playbackToken
+
+        playerNode.scheduleSegment(
+            audioFile,
+            startingFrame: clampedFrame,
+            frameCount: AVAudioFrameCount(remainingFrames),
+            at: nil
+        ) { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard self.scheduledPlaybackToken == playbackToken else { return }
+                self.currentFramePosition = audioFile.length
+                self.currentTime = self.duration
+                self.isPlaying = false
+                self.handlePlaybackCompletion(successfully: true)
+            }
+        }
+
+        do {
+            if !audioEngine.isRunning {
+                try audioEngine.start()
+            }
+        } catch {
+            NSSound.beep()
+            print("启动播放失败: \(error)")
+            return
+        }
+
+        if playImmediately {
+            playerNode.play()
+            isPlaying = true
+        } else {
+            isPlaying = false
+        }
+    }
+
+    private func invalidateScheduledCompletion() {
+        scheduledPlaybackToken = UUID()
+    }
+
+    private func captureCurrentFramePosition() {
+        currentFramePosition = currentPlaybackFrame()
+        currentTime = Double(currentFramePosition) / currentSampleRate
+        currentStartFrame = currentFramePosition
+    }
+
+    private func currentPlaybackFrame() -> AVAudioFramePosition {
+        guard let nodeTime = playerNode.lastRenderTime,
+              let playerTime = playerNode.playerTime(forNodeTime: nodeTime) else {
+            return currentFramePosition
+        }
+
+        let playedFrames = Double(playerTime.sampleTime) * (currentSampleRate / playerTime.sampleRate)
+        let absoluteFrame = currentStartFrame + AVAudioFramePosition(playedFrames.rounded())
+        return min(max(absoluteFrame, 0), currentAudioFile?.length ?? absoluteFrame)
+    }
+
+    private func currentPlaybackTime() -> TimeInterval {
+        Double(currentPlaybackFrame()) / currentSampleRate
+    }
+
+    private func refreshCurrentLyricIndex() {
+        guard !lyrics.timedLines.isEmpty else {
+            currentLyricIndex = nil
+            return
+        }
+
+        let index = lyrics.timedLines.lastIndex { $0.time <= currentTime } ?? 0
+        currentLyricIndex = index
+    }
+
+    private func scanDirectory(_ directory: URL) -> [AudioTrack] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return []
+        }
+
+        var tracks: [AudioTrack] = []
+        for case let fileURL as URL in enumerator {
+            guard Self.supportedExtensions.contains(fileURL.pathExtension.lowercased()) else { continue }
+            tracks.append(AudioTrack(url: fileURL))
+        }
+
+        return tracks
+    }
+
+    private func normalizedPath(for url: URL) -> String {
+        url.standardizedFileURL.path
+    }
+
+    private func normalizedPath(forPath path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+
+    private func resolvedNextIndex(autoAdvance: Bool) -> Int? {
+        guard let currentPlayingPlaylist, !currentPlayingPlaylist.tracks.isEmpty else { return nil }
+        let tracks = currentPlayingPlaylist.tracks
+
+        switch playbackMode {
+        case .shuffle:
+            guard tracks.count > 1 else { return currentIndex ?? 0 }
+            var candidates = Array(tracks.indices)
+            if let currentIndex {
+                candidates.removeAll { $0 == currentIndex }
+            }
+            return candidates.randomElement()
+        case .listLoop:
+            return ((currentIndex ?? -1) + 1) % tracks.count
+        case .sequential:
+            let proposed = (currentIndex ?? -1) + 1
+            if proposed < tracks.count {
+                return proposed
+            }
+            return autoAdvance ? nil : 0
+        }
+    }
+
+    private func resolvedPreviousIndex() -> Int {
+        guard let currentPlayingPlaylist, !currentPlayingPlaylist.tracks.isEmpty else { return 0 }
+        let tracks = currentPlayingPlaylist.tracks
+
+        switch playbackMode {
+        case .shuffle:
+            guard tracks.count > 1 else { return currentIndex ?? 0 }
+            var candidates = Array(tracks.indices)
+            if let currentIndex {
+                candidates.removeAll { $0 == currentIndex }
+            }
+            return candidates.randomElement() ?? 0
+        case .listLoop, .sequential:
+            return ((currentIndex ?? tracks.count) - 1 + tracks.count) % tracks.count
+        }
+    }
+
+    private func handlePlaybackCompletion(successfully: Bool) {
+        if successfully {
+            if let queued = resolveNextQueuedTrack() {
+                playTrack(at: queued.trackIndex, in: queued.playlistID)
+                return
+            }
+            if let nextIndex = resolvedNextIndex(autoAdvance: true) {
+                if let currentPlayingPlaylistID {
+                    playTrack(at: nextIndex, in: currentPlayingPlaylistID)
+                }
+            } else {
+                currentFramePosition = currentAudioFile?.length ?? currentFramePosition
+                currentTime = duration
+                isPlaying = false
+            }
+        } else {
+            stopPlayback()
+        }
+    }
+
+    private func isDirectory(_ url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+    }
+
+    private func configurePersistence() {
+        NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)
+            .sink { [weak self] _ in
+                self?.persistAppState(capturingPlaybackPosition: true)
+            }
+            .store(in: &cancellables)
+
+        Publishers.CombineLatest4($playlists, $selectedPlaylistID, $playbackMode, $interfaceMode)
+            .dropFirst()
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            .sink { [weak self] _, _, _, _ in
+                self?.persistAppState()
+            }
+            .store(in: &cancellables)
+
+        Publishers.CombineLatest4($volume, $isDesktopLyricsVisible, $desktopLyricsFontSize, $desktopLyricsOpacity)
+            .dropFirst()
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            .sink { [weak self] _, _, _, _ in
+                self?.persistAppState()
+            }
+            .store(in: &cancellables)
+
+        Publishers.CombineLatest4($isDesktopLyricsLocked, $desktopLyricsDisplayMode, $desktopLyricsBackgroundStyle, $isEqualizerEnabled)
+            .dropFirst()
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            .sink { [weak self] _, _, _, _ in
+                self?.persistAppState()
+            }
+            .store(in: &cancellables)
+
+        Publishers.CombineLatest3($isEqualizerExpanded, $selectedEqualizerPreset, $equalizerBands)
+            .dropFirst()
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            .sink { [weak self] _, _, _ in
+                self?.persistAppState()
+            }
+            .store(in: &cancellables)
+
+        Publishers.CombineLatest($appTheme, $customBackgroundImagePath)
+            .dropFirst()
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            .sink { [weak self] _, _ in
+                self?.persistAppState()
+            }
+            .store(in: &cancellables)
+    }
+
+    private func appendListeningHistory(for track: AudioTrack) {
+        listeningHistory.insert(ListeningHistoryRecord(track: track), at: 0)
+        if listeningHistory.count > 5_000 {
+            listeningHistory.removeLast(listeningHistory.count - 5_000)
+        }
+        persistListeningHistory()
+    }
+
+    private func restoreListeningHistory() {
+        guard let data = UserDefaults.standard.data(forKey: Self.listeningHistoryDefaultsKey),
+              let decoded = try? JSONDecoder().decode([ListeningHistoryRecord].self, from: data) else {
+            listeningHistory = []
+            return
+        }
+        listeningHistory = decoded
+    }
+
+    private func persistListeningHistory() {
+        guard let data = try? JSONEncoder().encode(listeningHistory) else { return }
+        UserDefaults.standard.set(data, forKey: Self.listeningHistoryDefaultsKey)
+    }
+
+    private func restorePersistedState() {
+        guard let data = UserDefaults.standard.data(forKey: Self.appStateDefaultsKey),
+              let persisted = try? JSONDecoder().decode(PersistedAppState.self, from: data) else {
+            return
+        }
+
+        isRestoringState = true
+        defer { isRestoringState = false }
+
+        let restoredPlaylists = persisted.playlists.map(\.resolvedPlaylist)
+        if !restoredPlaylists.isEmpty {
+            playlists = restoredPlaylists
+        }
+
+        if playlists.contains(where: { $0.id == persisted.selectedPlaylistID }) {
+            selectedPlaylistID = persisted.selectedPlaylistID
+        } else if let firstID = playlists.first?.id {
+            selectedPlaylistID = firstID
+        }
+
+        playbackMode = PlaybackMode(rawValue: persisted.playbackMode) ?? .sequential
+        interfaceMode = InterfaceMode(rawValue: persisted.interfaceMode) ?? .compact
+        volume = persisted.volume
+        isDesktopLyricsVisible = persisted.isDesktopLyricsVisible
+        desktopLyricsFontSize = persisted.desktopLyricsFontSize
+        desktopLyricsOpacity = persisted.desktopLyricsOpacity
+        isDesktopLyricsLocked = persisted.isDesktopLyricsLocked
+        desktopLyricsDisplayMode = DesktopLyricsDisplayMode(rawValue: persisted.desktopLyricsDisplayMode) ?? .dualLine
+        desktopLyricsBackgroundStyle = DesktopLyricsBackgroundStyle(rawValue: persisted.desktopLyricsBackgroundStyle) ?? .themed
+        isEqualizerEnabled = persisted.isEqualizerEnabled
+        isEqualizerExpanded = persisted.isEqualizerExpanded
+        selectedEqualizerPreset = EqualizerPreset(rawValue: persisted.selectedEqualizerPreset) ?? .custom
+        appTheme = AppTheme(rawValue: persisted.appTheme) ?? .system
+        if persisted.equalizerGains.count == equalizerBands.count {
+            equalizerBands = zip(equalizerBands, persisted.equalizerGains).map { band, gain in
+                var updated = band
+                updated.gain = gain
+                return updated
+            }
+        }
+        if let customBackgroundImagePath = persisted.customBackgroundImagePath {
+            loadCustomBackgroundImage(fromPath: customBackgroundImagePath)
+        }
+
+        playbackQueue = (persisted.queuedTracks ?? []).map {
+            QueuedTrack(playlistID: $0.playlistID, trackPath: normalizedPath(forPath: $0.trackPath))
+        }
+        queuedTrackPaths = playbackQueue.map(\.trackPath)
+
+        restorePlaybackState(persisted.playbackState)
+    }
+
+    private func restorePlaybackState(_ playbackState: PersistedPlaybackState) {
+        guard let playlistID = playbackState.currentPlayingPlaylistID,
+              let trackPath = playbackState.currentTrackPath,
+              let playlistIndex = playlists.firstIndex(where: { $0.id == playlistID }) else {
+            return
+        }
+
+        let normalizedTrackPath = normalizedPath(forPath: trackPath)
+        guard let trackIndex = playlists[playlistIndex].tracks.firstIndex(where: { normalizedPath(for: $0.url) == normalizedTrackPath }) else {
+            return
+        }
+
+        loadTrack(
+            at: trackIndex,
+            in: playlistID,
+            startTime: playbackState.currentTime,
+            autoPlay: playbackState.wasPlaying,
+            recordHistory: false
+        )
+    }
+
+    private func persistAppState(capturingPlaybackPosition: Bool = false) {
+        guard !isRestoringState else { return }
+
+        if capturingPlaybackPosition, currentAudioFile != nil {
+            if isPlaying {
+                captureCurrentFramePosition()
+            } else {
+                currentTime = Double(currentFramePosition) / currentSampleRate
+            }
+        }
+
+        guard let selectedPlaylistID = playlists.first(where: { $0.id == self.selectedPlaylistID })?.id ?? playlists.first?.id else { return }
+
+        let playbackState = PersistedPlaybackState(
+            selectedPlaylistID: self.selectedPlaylistID,
+            currentPlayingPlaylistID: currentPlayingPlaylistID,
+            currentTrackPath: currentTrack?.url.path,
+            currentTime: currentTime,
+            wasPlaying: isPlaying
+        )
+
+        let state = PersistedAppState(
+            playlists: playlists.map(PersistedPlaylistCollection.init),
+            selectedPlaylistID: selectedPlaylistID,
+            playbackMode: playbackMode.rawValue,
+            interfaceMode: interfaceMode.rawValue,
+            volume: volume,
+            isDesktopLyricsVisible: isDesktopLyricsVisible,
+            desktopLyricsFontSize: desktopLyricsFontSize,
+            desktopLyricsOpacity: desktopLyricsOpacity,
+            isDesktopLyricsLocked: isDesktopLyricsLocked,
+            desktopLyricsDisplayMode: desktopLyricsDisplayMode.rawValue,
+            desktopLyricsBackgroundStyle: desktopLyricsBackgroundStyle.rawValue,
+            isEqualizerEnabled: isEqualizerEnabled,
+            isEqualizerExpanded: isEqualizerExpanded,
+            selectedEqualizerPreset: selectedEqualizerPreset.rawValue,
+            equalizerGains: equalizerBands.map(\.gain),
+            appTheme: appTheme.rawValue,
+            customBackgroundImagePath: customBackgroundImagePath,
+            queuedTracks: playbackQueue.map {
+                PersistedQueuedTrack(playlistID: $0.playlistID, trackPath: $0.trackPath)
+            },
+            playbackState: playbackState
+        )
+
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        UserDefaults.standard.set(data, forKey: Self.appStateDefaultsKey)
+    }
+
+    private func startLyricsLoad(for track: AudioTrack, duration: TimeInterval) {
+        lyricsTask?.cancel()
+        lyricsTask = Task { [weak self] in
+            guard let self else { return }
+
+            let embeddedLyrics = await AudioAssetLoader.loadLyrics(for: track.url)
+            guard !Task.isCancelled, self.currentTrack?.url == track.url else { return }
+
+            if !embeddedLyrics.isEmpty {
+                self.lyrics = embeddedLyrics
+                self.refreshCurrentLyricIndex()
+            } else {
+                let sidecarLyrics = LyricsParser.loadLyrics(for: track)
+                if !sidecarLyrics.isEmpty {
+                    self.lyrics = sidecarLyrics
+                    self.refreshCurrentLyricIndex()
+                }
+            }
+
+            guard self.lyrics.isEmpty else { return }
+
+            let info = TrackSearchInfo(
+                title: track.title,
+                artist: track.artist,
+                album: track.album,
+                duration: duration
+            )
+
+            if let fetchedLyrics = await OnlineMetadataService.shared.fetchLyrics(for: track, info: info),
+               !Task.isCancelled,
+               self.currentTrack?.url == track.url {
+                self.lyrics = fetchedLyrics
+                self.refreshCurrentLyricIndex()
+            }
+        }
+    }
+
+    private func startArtworkLoad(for track: AudioTrack) {
+        artworkTask?.cancel()
+        artworkTask = Task { [weak self] in
+            guard let self else { return }
+            if let image = await AudioAssetLoader.loadArtwork(for: track.url),
+               !Task.isCancelled,
+               self.currentTrack?.url == track.url {
+                self.currentArtwork = image
+            }
+
+            let info = TrackSearchInfo(
+                title: track.title,
+                artist: track.artist,
+                album: track.album,
+                duration: self.duration
+            )
+            if self.currentArtwork == nil,
+               let fetchedArtwork = await OnlineMetadataService.shared.fetchArtwork(for: track, info: info),
+               !Task.isCancelled,
+               self.currentTrack?.url == track.url {
+                self.currentArtwork = fetchedArtwork
+            }
+        }
+    }
+
+    private func enrichMetadataForNewTracks(startingAt startIndex: Int, in playlistID: UUID) {
+        guard let playlistIndex = playlists.firstIndex(where: { $0.id == playlistID }) else { return }
+        guard playlists[playlistIndex].tracks.indices.contains(startIndex) else { return }
+
+        let targets = Array(playlists[playlistIndex].tracks[startIndex...].enumerated())
+        for (offset, track) in targets {
+            let index = startIndex + offset
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let metadata = await AudioAssetLoader.loadMetadata(for: track.url)
+                guard let playlistIndex = self.playlists.firstIndex(where: { $0.id == playlistID }) else { return }
+                guard self.playlists[playlistIndex].tracks.indices.contains(index), self.playlists[playlistIndex].tracks[index].url == track.url else { return }
+
+                let updated = self.playlists[playlistIndex].tracks[index].withMetadata(
+                    title: metadata.title,
+                    artist: metadata.artist,
+                    album: metadata.album
+                )
+                self.playlists[playlistIndex].tracks[index] = updated
+            }
+        }
+    }
+
+    private func loadURL(from provider: NSItemProvider) async -> URL? {
+        await withCheckedContinuation { continuation in
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                if let data = item as? Data,
+                   let url = URL(dataRepresentation: data, relativeTo: nil) {
+                    continuation.resume(returning: url)
+                    return
+                }
+
+                if let url = item as? URL {
+                    continuation.resume(returning: url)
+                    return
+                }
+
+                continuation.resume(returning: nil)
+            }
+        }
+    }
+
+    private static func makeDefaultEqualizerBands() -> [EqualizerBandSetting] {
+        let frequencies: [Float] = [31, 62, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
+        let labels = ["31", "62", "125", "250", "500", "1K", "2K", "4K", "8K", "16K"]
+
+        return zip(frequencies.indices, zip(frequencies, labels)).map { index, pair in
+            EqualizerBandSetting(id: index, frequency: pair.0, label: pair.1, gain: 0)
+        }
+    }
+
+    private static func equalizerBands(for preset: EqualizerPreset) -> [EqualizerBandSetting] {
+        let gains: [Float]
+
+        switch preset {
+        case .custom:
+            gains = Array(repeating: 0, count: 10)
+        case .vocal:
+            gains = [-2, -1, 0, 2, 3, 4, 4, 3, 1, 0]
+        case .bassBoost:
+            gains = [5, 4, 3, 2, 1, 0, -1, -2, -2, -2]
+        case .pop:
+            gains = [-1, 2, 3, 4, 2, 0, -1, -1, 1, 2]
+        case .rock:
+            gains = [3, 2, 1, 0, -1, 1, 3, 4, 4, 3]
+        case .classical:
+            gains = [0, 0, -1, -2, 0, 2, 3, 3, 2, 1]
+        }
+
+        return makeDefaultEqualizerBands().enumerated().map { index, band in
+            var updated = band
+            updated.gain = gains[index]
+            return updated
+        }
+    }
+
+    private var selectedPlaylistIndex: Int? {
+        playlists.firstIndex(where: { $0.id == selectedPlaylistID })
+    }
+
+    private var currentPlaylist: PlaylistCollection {
+        playlists[selectedPlaylistIndex ?? 0]
+    }
+
+    private var currentPlayingPlaylist: PlaylistCollection? {
+        guard let currentPlayingPlaylistID else { return nil }
+        return playlists.first(where: { $0.id == currentPlayingPlaylistID })
+    }
+
+    private struct QueuedTrack {
+        let playlistID: UUID
+        let trackPath: String
+    }
+
+    private var playbackQueue: [QueuedTrack] = [] {
+        didSet {
+            queuedTrackPaths = playbackQueue.map(\.trackPath)
+        }
+    }
+
+    private func nextPlaylistName() -> String {
+        let base = "新建歌单"
+        var counter = 1
+        while playlists.contains(where: { $0.name == "\(base) \(counter)" }) {
+            counter += 1
+        }
+        return "\(base) \(counter)"
+    }
+
+    private func uniquePlaylistName(for baseName: String) -> String {
+        guard playlists.contains(where: { $0.name == baseName }) else { return baseName }
+        var counter = 2
+        while playlists.contains(where: { $0.name == "\(baseName) \(counter)" }) {
+            counter += 1
+        }
+        return "\(baseName) \(counter)"
+    }
+
+    private func resolveNextQueuedTrack() -> (playlistID: UUID, trackIndex: Int)? {
+        while !playbackQueue.isEmpty {
+            let queued = playbackQueue.removeFirst()
+            guard let playlistIndex = playlists.firstIndex(where: { $0.id == queued.playlistID }) else { continue }
+            let normalized = normalizedPath(forPath: queued.trackPath)
+            guard let trackIndex = playlists[playlistIndex].tracks.firstIndex(where: {
+                normalizedPath(for: $0.url) == normalized
+            }) else { continue }
+            return (queued.playlistID, trackIndex)
+        }
+        return nil
+    }
+
+    private func setCustomBackgroundImage(from url: URL) {
+        guard let image = NSImage(contentsOf: url) else {
+            NSSound.beep()
+            return
+        }
+        customBackgroundImage = image
+        customBackgroundImagePath = url.path
+        appTheme = .customImage
+    }
+
+    private func loadCustomBackgroundImage(fromPath path: String) {
+        guard let image = NSImage(contentsOfFile: path) else {
+            customBackgroundImage = nil
+            customBackgroundImagePath = nil
+            if appTheme == .customImage {
+                appTheme = .system
+            }
+            return
+        }
+        customBackgroundImage = image
+        customBackgroundImagePath = path
+    }
+
+    private static let monthFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "yyyy年M月"
+        return formatter
+    }()
+}
