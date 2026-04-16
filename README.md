@@ -1,6 +1,6 @@
 # Zephyr Player
 
-Zephyr Player 是一个面向 macOS 的原生本地音乐播放器，基于 `SwiftUI` 和 `AVFoundation` 构建，聚焦本地音频播放、歌词体验、歌单管理和桌面使用场景。
+Zephyr Player 是一个面向 macOS 的原生本地音乐播放器，基于 `SwiftUI` 和 `AVFoundation` 构建，聚焦本地音频播放、歌词体验、歌单管理和桌面使用场景，本项目每一行代码都是AI写的，纯娱乐项目。
 
 ## Preview
 
@@ -10,10 +10,12 @@ Zephyr Player 是一个面向 macOS 的原生本地音乐播放器，基于 `Swi
 
 简洁模式
 
-<img src="XcodeApp/Assets.xcassets/AppIcon.appiconset/simple.png" width="24%" />
-<img src="XcodeApp/Assets.xcassets/AppIcon.appiconset/simple-black.png" width="24%" />
-<img src="XcodeApp/Assets.xcassets/AppIcon.appiconset/simple-white.png" width="24%" />
-<img src="XcodeApp/Assets.xcassets/AppIcon.appiconset/simple-diy.png" width="24%" />
+<p align="left">
+  <img src="XcodeApp/Assets.xcassets/AppIcon.appiconset/simple.png" width="24%" />
+  <img src="XcodeApp/Assets.xcassets/AppIcon.appiconset/simple-black.png" width="24%" />
+  <img src="XcodeApp/Assets.xcassets/AppIcon.appiconset/simple-white.png" width="24%" />
+  <img src="XcodeApp/Assets.xcassets/AppIcon.appiconset/simple-diy.png" width="24%" />
+</p>
 
 ## Features
 
