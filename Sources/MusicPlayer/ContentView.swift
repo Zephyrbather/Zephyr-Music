@@ -42,6 +42,10 @@ struct ContentView: View {
     @State private var isCreatePlaylistSheetPresented = false
     @State private var newPlaylistName = ""
     @State private var isDeletePlaylistAlertPresented = false
+    @State private var isImmersiveVolumeExpanded = false
+    @State private var isImmersivePlaylistPreviewPresented = false
+    @State private var immersivePlaylistPreviewHideToken = UUID()
+    @State private var suppressLyricAutoScrollAnimation = false
 
     private var theme: PlayerTheme {
         PlayerTheme.forSelection(viewModel.appTheme, colorScheme: colorScheme)
@@ -69,6 +73,27 @@ struct ContentView: View {
 
     private var filteredPlaylist: [(index: Int, track: AudioTrack)] { filteredPlaylistCache }
     private var usesImageBackground: Bool { viewModel.appTheme == .customImage && viewModel.customBackgroundImage != nil }
+    private var immersivePreviewPlaylist: PlaylistCollection? {
+        let targetID = viewModel.currentPlayingPlaylistID ?? viewModel.selectedPlaylistID
+        return viewModel.playlists.first(where: { $0.id == targetID }) ?? viewModel.playlists.first
+    }
+    private var immersivePreviewPlaylistID: UUID {
+        immersivePreviewPlaylist?.id ?? viewModel.selectedPlaylistID
+    }
+    private var immersivePreviewPlaylistName: String {
+        immersivePreviewPlaylist.map(viewModel.displayName(for:)) ?? viewModel.selectedPlaylistName
+    }
+    private var immersivePreviewTrackCount: Int {
+        immersivePreviewPlaylist?.tracks.count ?? 0
+    }
+    private var immersivePreviewCurrentIndex: Int? {
+        guard viewModel.currentPlayingPlaylistID == immersivePreviewPlaylist?.id else { return nil }
+        return viewModel.currentIndex
+    }
+    private var immersivePreviewTracks: [(index: Int, track: AudioTrack)] {
+        guard let tracks = immersivePreviewPlaylist?.tracks else { return [] }
+        return Array(tracks.enumerated()).map { (index: $0.offset, track: $0.element) }
+    }
     private var forcedColorScheme: ColorScheme? {
         switch viewModel.appTheme {
         case .system:
@@ -79,20 +104,44 @@ struct ContentView: View {
             return .light
         }
     }
+    private var rootPadding: CGFloat {
+        switch viewModel.interfaceMode {
+        case .compact:
+            return 14
+        case .full:
+            return 20
+        case .immersive:
+            return 0
+        }
+    }
+
+    private var minimumContentSize: CGSize {
+        switch viewModel.interfaceMode {
+        case .compact:
+            return CGSize(width: 380, height: 720)
+        case .full:
+            return CGSize(width: 1320, height: 780)
+        case .immersive:
+            return CGSize(width: 960, height: 620)
+        }
+    }
 
     var body: some View {
         Group {
-            if viewModel.interfaceMode == .compact {
+            switch viewModel.interfaceMode {
+            case .compact:
                 compactLayout
-            } else {
+            case .full:
                 fullLayout
+            case .immersive:
+                immersiveLayout
             }
         }
         .background(WindowAccessor(window: $hostWindow))
-        .padding(viewModel.interfaceMode == .compact ? 14 : 20)
+        .padding(rootPadding)
         .frame(
-            minWidth: viewModel.interfaceMode == .compact ? 380 : 1320,
-            minHeight: viewModel.interfaceMode == .compact ? 720 : 780
+            minWidth: minimumContentSize.width,
+            minHeight: minimumContentSize.height
         )
         .background(backgroundView)
         .foregroundStyle(theme.primaryText)
@@ -102,6 +151,10 @@ struct ContentView: View {
         .onReceive(viewModel.$currentTime) { _ in
             guard !isDraggingSlider else { return }
             sliderValue = viewModel.progress
+        }
+        .onChange(of: viewModel.currentTrack?.url.standardizedFileURL.path) { _ in
+            lyricScrollAnchor = .center
+            suppressLyricAutoScrollAnimation = true
         }
         .onReceive(viewModel.$playlistSearchFocusRequest) { _ in
             isPlaylistSearchFocused = true
@@ -119,6 +172,10 @@ struct ContentView: View {
             resizeWindowIfNeeded(for: viewModel.interfaceMode)
         }
         .onChange(of: viewModel.interfaceMode) { newValue in
+            if newValue != .immersive {
+                isImmersiveVolumeExpanded = false
+                isImmersivePlaylistPreviewPresented = false
+            }
             resizeWindowIfNeeded(for: newValue)
         }
         .onChange(of: hostWindow) { _ in
@@ -193,6 +250,99 @@ struct ContentView: View {
         .frame(maxWidth: 380, maxHeight: .infinity)
     }
 
+    private var immersiveLayout: some View {
+        GeometryReader { geometry in
+            let size = geometry.size
+            let compactHeight = size.height < 700
+            let compactWidth = size.width < 1120
+            let horizontalPadding = clamp(size.width * (compactWidth ? 0.042 : 0.05), min: 20, max: 56)
+            let topPadding = clamp(size.height * 0.035, min: 16, max: 28)
+            let bottomPadding = clamp(size.height * 0.028, min: 16, max: 26)
+            let leftWidth = clamp(size.width * (compactWidth ? 0.36 : 0.33), min: 280, max: 420)
+            let discSize = clamp(
+                min(size.width * (compactWidth ? 0.29 : 0.31), size.height * (compactHeight ? 0.31 : 0.39)),
+                min: 180,
+                max: 380
+            )
+            let lyricWidth = clamp(size.width * (compactWidth ? 0.27 : 0.24), min: 200, max: 280)
+            let lyricHeight = clamp(size.height * (compactHeight ? 0.27 : 0.34), min: 160, max: 280)
+            let contentSpacing = clamp(size.width * 0.04, min: 16, max: 44)
+            let titleFontSize = clamp(size.width * 0.021, min: compactHeight ? 20 : 22, max: 34)
+            let lyricProminentFont = clamp(min(size.width * 0.021, size.height * 0.04), min: 20, max: 34)
+            let lyricRegularFont = clamp(lyricProminentFont * 0.62, min: 15, max: 22)
+            let lyricTimestampWidth = clamp(size.width * 0.036, min: 36, max: 52)
+            let transportWidth = clamp(size.width * 0.36, min: 300, max: 430)
+            let discInfoSpacing = clamp(size.height * 0.016, min: 10, max: 18)
+            let topSectionSpacing = clamp(size.height * 0.02, min: 10, max: 22)
+            let bottomSectionSpacing = clamp(size.height * 0.025, min: 12, max: 24)
+            let sidePanelWidth = viewModel.isEqualizerExpanded
+                ? clamp(size.width * (compactWidth ? 0.32 : 0.3), min: 260, max: 380)
+                : lyricWidth
+            let sidePanelHeight = viewModel.isEqualizerExpanded
+                ? clamp(size.height * (compactHeight ? 0.35 : 0.44), min: 210, max: 340)
+                : lyricHeight
+
+            VStack(spacing: 0) {
+                immersiveHeader
+
+                Spacer(minLength: topSectionSpacing)
+
+                HStack(alignment: .center, spacing: contentSpacing) {
+                    VStack(spacing: discInfoSpacing) {
+                        SpinningVinylDisc(
+                            artwork: viewModel.currentArtwork,
+                            theme: theme,
+                            usesImageBackground: usesImageBackground,
+                            size: discSize,
+                            isPlaying: viewModel.isPlaying,
+                            tapHint: tr("点击封面退出沉浸式模式", "Click the artwork to exit immersive mode")
+                        ) {
+                            viewModel.toggleImmersiveMode()
+                        }
+
+                        immersiveTrackInfoSection(titleFontSize: titleFontSize)
+                    }
+                    .frame(width: leftWidth)
+
+                    Group {
+                        if viewModel.isEqualizerExpanded {
+                            equalizerSection(isImmersive: true)
+                        } else {
+                            immersiveLyricsPanel(
+                                contentPadding: clamp(size.height * 0.02, min: 12, max: 18),
+                                rowSpacing: clamp(size.height * 0.012, min: 8, max: 14),
+                                prominentFontSize: lyricProminentFont,
+                                regularFontSize: lyricRegularFont,
+                                timestampWidth: lyricTimestampWidth
+                            )
+                        }
+                    }
+                    .frame(width: sidePanelWidth, height: sidePanelHeight, alignment: .top)
+                }
+                .frame(maxWidth: .infinity)
+
+                Spacer(minLength: bottomSectionSpacing)
+
+                immersiveTransportSection(maxWidth: transportWidth, compact: compactHeight)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
+            .padding(.horizontal, horizontalPadding)
+            .padding(.top, topPadding)
+            .padding(.bottom, bottomPadding)
+            .frame(width: size.width, height: size.height)
+            .overlay(alignment: .topTrailing) {
+                if isImmersivePlaylistPreviewPresented {
+                    immersivePlaylistPreviewPanel
+                        .padding(.top, topPadding + 40)
+                        .padding(.trailing, horizontalPadding + 132)
+                        .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .topTrailing)))
+                        .zIndex(10)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 6) {
@@ -211,6 +361,8 @@ struct ContentView: View {
                     viewModel.isEqualizerExpanded.toggle()
                 }
                 .fixedSize()
+
+                dataTransferMenu
 
                 themeMenu
 
@@ -262,6 +414,7 @@ struct ContentView: View {
                 } label: {
                     compactHeaderIconLabel(systemName: "plus.circle")
                 }
+                .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
 
                 compactHeaderIconButton {
@@ -275,6 +428,7 @@ struct ContentView: View {
                 } label: {
                     compactHeaderIconLabel(systemName: "paintpalette")
                 }
+                .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
 
                 compactHeaderIconButton {
@@ -286,7 +440,6 @@ struct ContentView: View {
             .frame(maxWidth: .infinity)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .buttonStyle(.bordered)
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(panelBackground(primary: true))
@@ -295,7 +448,7 @@ struct ContentView: View {
     private var nowPlayingCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 18) {
-                artworkView(size: 134, cornerRadius: 20)
+                immersiveToggleArtworkButton(size: 134, cornerRadius: 20)
 
                 VStack(alignment: .leading, spacing: 14) {
                     Text(tr("正在播放", "Now Playing"))
@@ -320,7 +473,7 @@ struct ContentView: View {
     private var compactNowPlayingCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                artworkView(size: 54, cornerRadius: 12)
+                immersiveToggleArtworkButton(size: 54, cornerRadius: 12)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(viewModel.currentTrack?.title ?? tr("未选择歌曲", "No Track Selected"))
@@ -381,6 +534,9 @@ struct ContentView: View {
                 Label(viewModel.playbackMode.title(in: language), systemImage: viewModel.playbackMode.symbolName)
             }
             .fixedSize()
+
+            playbackRateControl
+                .fixedSize()
 
             Spacer()
 
@@ -461,75 +617,210 @@ struct ContentView: View {
     }
 
     private var equalizerSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text(tr("均衡器", "Equalizer"))
-                    .font(.headline)
+        equalizerSection(isImmersive: false)
+    }
 
-                Spacer()
+    private func equalizerSection(isImmersive: Bool) -> some View {
+        VStack(alignment: .leading, spacing: isImmersive ? 14 : 16) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(tr("均衡器", "Equalizer"))
+                        .font(.headline)
 
-                Toggle(tr("启用", "Enable"), isOn: $viewModel.isEqualizerEnabled)
-                    .toggleStyle(.switch)
+                    Text(viewModel.currentEqualizerPresetDisplayName)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(theme.secondaryText)
+                }
 
-                Button(tr("重置", "Reset")) {
-                    viewModel.resetEqualizer()
+                Spacer(minLength: 12)
+
+                HStack(spacing: 8) {
+                    equalizerStatusChip(
+                        title: viewModel.isEqualizerEnabled ? tr("已启用", "Enabled") : tr("已关闭", "Disabled"),
+                        systemName: viewModel.isEqualizerEnabled ? "waveform.path" : "waveform.path.badge.minus"
+                    )
+
+                    Button {
+                        viewModel.resetEqualizer()
+                    } label: {
+                        equalizerControlPill(
+                            title: tr("重置", "Reset"),
+                            systemName: "arrow.counterclockwise",
+                            active: false,
+                            isImmersive: isImmersive
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
             }
 
-            HStack(spacing: 12) {
-                Text(tr("预设", "Preset"))
-                    .foregroundStyle(theme.secondaryText)
+            HStack(spacing: 10) {
+                Button {
+                    viewModel.isEqualizerEnabled.toggle()
+                } label: {
+                    equalizerControlPill(
+                        title: viewModel.isEqualizerEnabled ? tr("关闭", "Disable") : tr("启用", "Enable"),
+                        systemName: viewModel.isEqualizerEnabled ? "bolt.slash" : "bolt",
+                        active: viewModel.isEqualizerEnabled,
+                        isImmersive: isImmersive
+                    )
+                }
+                .buttonStyle(.plain)
 
-                Picker(tr("预设", "Preset"), selection: $viewModel.selectedEqualizerPreset) {
-                    ForEach(PlayerViewModel.EqualizerPreset.allCases) { preset in
-                        Text(preset.title(in: language)).tag(preset)
+                Menu {
+                    equalizerPresetMenuContent
+                } label: {
+                    equalizerControlPill(
+                        title: tr("预设", "Preset") + " · " + viewModel.currentEqualizerPresetDisplayName,
+                        systemName: "dial.medium",
+                        active: false,
+                        isImmersive: isImmersive
+                    )
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+
+                Button {
+                    viewModel.promptToSaveCurrentEqualizerPreset()
+                } label: {
+                    equalizerControlPill(
+                        title: tr("保存风格", "Save Style"),
+                        systemName: "square.and.arrow.down",
+                        active: false,
+                        isImmersive: isImmersive
+                    )
+                }
+                .buttonStyle(.plain)
+
+                if let savedPreset = viewModel.selectedSavedEqualizerPreset {
+                    Button {
+                        viewModel.removeSavedEqualizerPreset(savedPreset.id)
+                    } label: {
+                        equalizerControlPill(
+                            title: tr("删除风格", "Delete Style"),
+                            systemName: "trash",
+                            active: false,
+                            isImmersive: isImmersive
+                        )
                     }
-                }
-                .pickerStyle(.menu)
-                .onChange(of: viewModel.selectedEqualizerPreset) { preset in
-                    viewModel.applyEqualizerPreset(preset)
+                    .buttonStyle(.plain)
                 }
 
-                Spacer()
+                Spacer(minLength: 0)
 
-                Text(viewModel.isEqualizerEnabled ? tr("当前已启用", "Enabled") : tr("当前未启用", "Disabled"))
+                Text(tr("向上提亮，向下压低", "Lift for brightness, pull down for warmth"))
                     .font(.caption)
-                    .foregroundStyle(viewModel.isEqualizerEnabled ? theme.accent : theme.secondaryText)
+                    .foregroundStyle(theme.secondaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
             }
 
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .bottom, spacing: 16) {
+                HStack(alignment: .top, spacing: isImmersive ? 10 : 12) {
                     ForEach(Array(viewModel.equalizerBands.enumerated()), id: \.element.id) { index, band in
-                        VStack(spacing: 10) {
-                            Text(String(format: "%+.0f dB", band.gain))
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(abs(band.gain) > 0.1 ? theme.accent : theme.secondaryText)
-
-                            Slider(
-                                value: Binding(
-                                    get: { Double(viewModel.equalizerBands[index].gain) },
-                                    set: { viewModel.updateEqualizerBandGain(at: index, gain: Float($0)) }
-                                ),
-                                in: -12...12,
-                                step: 0.5
-                            )
-                            .frame(height: 120)
-                            .rotationEffect(.degrees(-90))
-                            .frame(width: 28, height: 120)
-
-                            Text(band.label)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(theme.secondaryText)
+                        EqualizerBandCard(
+                            band: band,
+                            theme: theme,
+                            isEnabled: viewModel.isEqualizerEnabled,
+                            isImmersive: isImmersive
+                        ) { newGain in
+                            viewModel.updateEqualizerBandGain(at: index, gain: Float(newGain))
                         }
-                        .frame(width: 48)
                     }
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
+                .padding(.horizontal, isImmersive ? 2 : 4)
+                .padding(.vertical, 4)
             }
         }
-        .padding(18)
-        .background(panelBackground(primary: false))
+        .padding(isImmersive ? 0 : 18)
+        .background {
+            if !isImmersive {
+                panelBackground(primary: false)
+            }
+        }
+    }
+
+    private func equalizerStatusChip(title: String, systemName: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemName)
+            Text(title)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(viewModel.isEqualizerEnabled ? theme.accent : theme.secondaryText)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            Capsule(style: .continuous)
+                .fill(viewModel.isEqualizerEnabled ? theme.accentSoft.opacity(0.34) : theme.panelSecondary.opacity(0.72))
+        )
+    }
+
+    private func equalizerControlPill(
+        title: String,
+        systemName: String,
+        active: Bool,
+        isImmersive: Bool
+    ) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemName)
+            Text(title)
+                .lineLimit(1)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(active ? theme.accent : theme.primaryText)
+        .padding(.horizontal, isImmersive ? 10 : 12)
+        .padding(.vertical, 7)
+        .background(
+            Capsule(style: .continuous)
+                .fill(active ? theme.accentSoft.opacity(0.42) : theme.panelSecondary.opacity(isImmersive ? 0.52 : 0.78))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(active ? theme.accent.opacity(0.22) : theme.border.opacity(isImmersive ? 0.28 : 0.8), lineWidth: 1)
+        )
+    }
+
+    @ViewBuilder
+    private var equalizerPresetMenuContent: some View {
+        ForEach(PlayerViewModel.EqualizerPreset.allCases) { preset in
+            Button {
+                viewModel.applyEqualizerPreset(preset)
+            } label: {
+                if viewModel.selectedUserEqualizerPresetID == nil && viewModel.selectedEqualizerPreset == preset {
+                    Label(preset.title(in: language), systemImage: "checkmark")
+                } else {
+                    Text(preset.title(in: language))
+                }
+            }
+        }
+
+        if !viewModel.userEqualizerPresets.isEmpty {
+            Divider()
+
+            ForEach(viewModel.userEqualizerPresets) { preset in
+                Button {
+                    viewModel.applySavedEqualizerPreset(preset.id)
+                } label: {
+                    if viewModel.selectedUserEqualizerPresetID == preset.id {
+                        Label(preset.name, systemImage: "checkmark")
+                    } else {
+                        Text(preset.name)
+                    }
+                }
+            }
+
+            Divider()
+
+            Menu(tr("删除自定义预设", "Delete Saved Preset")) {
+                ForEach(viewModel.userEqualizerPresets) { preset in
+                    Button(role: .destructive) {
+                        viewModel.removeSavedEqualizerPreset(preset.id)
+                    } label: {
+                        Text(preset.name)
+                    }
+                }
+            }
+        }
     }
 
     private var playlistSection: some View {
@@ -695,7 +986,8 @@ struct ContentView: View {
                 }
                 .foregroundStyle(theme.primaryText)
             }
-            .frame(width: viewModel.interfaceMode == .compact ? 126 : 140)
+            .frame(width: playlistSwitcherWidth)
+            .menuStyle(.borderlessButton)
             .menuIndicator(viewModel.interfaceMode == .compact ? .hidden : .visible)
 
             Button {
@@ -703,14 +995,20 @@ struct ContentView: View {
                 isCreatePlaylistSheetPresented = true
             } label: {
                 Image(systemName: "text.badge.plus")
+                    .symbolRenderingMode(.monochrome)
+                    .foregroundStyle(theme.primaryText)
             }
+            .buttonStyle(.plain)
             .help(tr("新建歌单", "New Playlist"))
 
             Button {
                 isDeletePlaylistAlertPresented = true
             } label: {
                 Image(systemName: "trash")
+                    .symbolRenderingMode(.monochrome)
+                    .foregroundStyle(theme.primaryText)
             }
+            .buttonStyle(.plain)
             .help(tr("删除当前歌单", "Delete Current Playlist"))
             .disabled(viewModel.playlists.count <= 1)
         }
@@ -853,6 +1151,7 @@ struct ContentView: View {
                 label()
             }
         }
+        .buttonStyle(.plain)
         .labelStyle(.iconOnly)
         .controlSize(.small)
         .font(.system(size: 12, weight: .semibold))
@@ -868,6 +1167,7 @@ struct ContentView: View {
         @ViewBuilder content: () -> Label
     ) -> some View {
         content()
+            .symbolRenderingMode(.monochrome)
             .frame(width: 24, height: 18)
             .foregroundStyle(theme.primaryText)
             .labelStyle(.iconOnly)
@@ -875,66 +1175,697 @@ struct ContentView: View {
             .font(.system(size: 12, weight: .semibold))
     }
 
-    private var lyricsPanel: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(tr("歌词", "Lyrics"))
-                .font(.headline)
+    private var immersiveHeader: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Zephyr Player")
+                    .font(.system(size: 24, weight: .bold, design: .serif))
+                    .italic()
+                    .tracking(0.6)
 
-            if !viewModel.lyrics.timedLines.isEmpty {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 10) {
-                            ForEach(Array(viewModel.lyrics.timedLines.enumerated()), id: \.element.id) { index, line in
-                                LyricJumpRow(
-                                    text: line.text,
-                                    time: line.time,
-                                    prominent: index == viewModel.currentLyricIndex,
-                                    theme: theme,
-                                    onSelect: {
-                                        lyricScrollAnchor = UnitPoint(x: 0.5, y: 0.68)
-                                        withAnimation(.easeInOut(duration: 0.22)) {
-                                            proxy.scrollTo(index, anchor: lyricScrollAnchor)
-                                        }
-                                        viewModel.seekToTime(line.time)
-                                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                                            lyricScrollAnchor = .center
-                                        }
-                                    }
-                                )
-                                .id(index)
-                                .animation(.easeInOut(duration: 0.2), value: viewModel.currentLyricIndex)
-                            }
-                        }
-                        .padding(.vertical, 24)
-                    }
-                    .onAppear {
-                        if let index = viewModel.currentLyricIndex {
-                            proxy.scrollTo(index, anchor: .center)
-                        }
-                    }
-                    .onChange(of: viewModel.currentLyricIndex) { newValue in
-                        guard let newValue else { return }
-                        withAnimation(.easeInOut(duration: 0.35)) {
-                            proxy.scrollTo(newValue, anchor: lyricScrollAnchor)
-                        }
-                    }
-                }
-            } else if let plainText = viewModel.lyrics.plainText, !plainText.isEmpty {
-                ScrollView {
-                    Text(plainText)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .foregroundStyle(theme.primaryText)
-                        .textSelection(.enabled)
-                }
-            } else {
-                Spacer()
-                Text(tr("当前歌曲未找到歌词文件。\n将同名 `.lrc` 或 `.txt` 放在音频文件旁即可自动加载。", "No lyrics were found for the current track.\nPlace a matching `.lrc` or `.txt` file next to the audio file to load it automatically."))
+                Text(tr("沉浸式模式", "Immersive Mode"))
+                    .font(.caption.weight(.medium))
                     .foregroundStyle(theme.secondaryText)
-                Spacer()
+
+                immersivePlaylistSwitcher
+            }
+
+            Spacer()
+
+            HStack(spacing: 12) {
+                immersivePlaylistPreviewTrigger
+
+                immersiveHeaderIconButton(
+                    systemName: viewModel.isDesktopLyricsVisible ? "quote.bubble.fill" : "quote.bubble",
+                    helpText: viewModel.isDesktopLyricsVisible
+                        ? tr("关闭桌面歌词", "Hide desktop lyrics")
+                        : tr("开启桌面歌词", "Show desktop lyrics"),
+                    emphasized: viewModel.isDesktopLyricsVisible
+                ) {
+                    viewModel.isDesktopLyricsVisible.toggle()
+                }
+
+                immersiveHeaderIconButton(
+                    systemName: viewModel.isEqualizerExpanded ? "slider.horizontal.below.square.filled.and.square" : "slider.horizontal.3",
+                    helpText: viewModel.isEqualizerExpanded
+                        ? tr("隐藏均衡器", "Hide equalizer")
+                        : tr("显示均衡器", "Show equalizer"),
+                    emphasized: viewModel.isEqualizerExpanded
+                ) {
+                    withAnimation(.easeInOut(duration: 0.22)) {
+                        viewModel.isEqualizerExpanded.toggle()
+                    }
+                }
+
+                immersiveThemeMenu
+
+                immersiveHeaderIconButton(
+                    systemName: "xmark",
+                    helpText: tr("退出沉浸式模式", "Exit immersive mode"),
+                    emphasized: false
+                ) {
+                    viewModel.toggleImmersiveMode()
+                }
             }
         }
-        .padding(22)
+        .zIndex(2)
+    }
+
+    private var immersivePlaylistPreviewTrigger: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                isImmersivePlaylistPreviewPresented.toggle()
+            }
+        } label: {
+            immersiveIconLabel(systemName: "music.note.list", emphasized: isImmersivePlaylistPreviewPresented)
+        }
+        .buttonStyle(.plain)
+        .help(tr("查看当前播放歌单", "View now playing playlist"))
+        .onHover { hovering in
+            if hovering {
+                showImmersivePlaylistPreview()
+            } else {
+                scheduleImmersivePlaylistPreviewHide()
+            }
+        }
+    }
+
+    private var immersivePlaylistSwitcher: some View {
+        Menu {
+            ForEach(viewModel.playlists) { playlist in
+                Button {
+                    viewModel.selectedPlaylistID = playlist.id
+                } label: {
+                    if viewModel.selectedPlaylistID == playlist.id {
+                        Label(viewModel.displayName(for: playlist), systemImage: "checkmark")
+                    } else {
+                        Text(viewModel.displayName(for: playlist))
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text(viewModel.selectedPlaylistName)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+
+                Image(systemName: "chevron.down")
+                    .font(.caption.weight(.semibold))
+            }
+            .foregroundStyle(theme.primaryText)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+    }
+
+    private var immersiveThemeMenu: some View {
+        Menu {
+            themeMenuContent
+        } label: {
+            immersiveIconLabel(systemName: "paintpalette")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+    }
+
+    private var immersivePlaylistPreviewPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(tr("当前播放歌单", "Now Playing Playlist"))
+                        .font(.headline)
+                        .lineLimit(1)
+
+                    Text(immersivePreviewSubtitle)
+                        .font(.caption)
+                        .foregroundStyle(theme.secondaryText)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 12)
+
+                Image(systemName: "music.note.list")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(theme.secondaryText)
+            }
+
+            if immersivePreviewTracks.isEmpty {
+                Text(tr("当前歌单还没有歌曲", "This playlist is empty"))
+                    .font(.subheadline)
+                    .foregroundStyle(theme.secondaryText)
+                    .padding(.vertical, 18)
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: true) {
+                        LazyVStack(alignment: .leading, spacing: 6) {
+                            ForEach(immersivePreviewTracks, id: \.index) { item in
+                                HStack(spacing: 10) {
+                                    Text("\(item.index + 1)")
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(isImmersivePreviewTrackCurrent(item.index) ? theme.accent : theme.secondaryText)
+                                        .frame(width: 20, alignment: .leading)
+
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(item.track.title)
+                                            .font(.subheadline.weight(isImmersivePreviewTrackCurrent(item.index) ? .semibold : .medium))
+                                            .foregroundStyle(isImmersivePreviewTrackCurrent(item.index) ? theme.accent : theme.primaryText)
+                                            .lineLimit(1)
+
+                                        Text([
+                                            item.track.artist ?? tr("未知艺术家", "Unknown Artist"),
+                                            item.track.album ?? tr("未知专辑", "Unknown Album")
+                                        ].joined(separator: " · "))
+                                        .font(.caption)
+                                        .foregroundStyle(theme.secondaryText)
+                                        .lineLimit(1)
+                                    }
+
+                                    Spacer(minLength: 0)
+
+                                    Button {
+                                        viewModel.queueTrackNext(item.track, in: immersivePreviewPlaylistID)
+                                    } label: {
+                                        Image(systemName: isImmersivePreviewTrackQueued(item.track) ? "checkmark.circle.fill" : "plus.circle")
+                                            .symbolRenderingMode(.monochrome)
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(isImmersivePreviewTrackQueued(item.track) ? theme.accent : theme.secondaryText)
+                                            .frame(width: 18, height: 18)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help(tr("添加到下一首播放", "Play next"))
+
+                                    if isImmersivePreviewTrackCurrent(item.index) {
+                                        Image(systemName: viewModel.isPlaying ? "waveform" : "pause.fill")
+                                            .font(.caption.weight(.bold))
+                                            .foregroundStyle(theme.accent)
+                                    }
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 8)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                        .fill(isImmersivePreviewTrackCurrent(item.index) ? theme.accentSoft.opacity(0.26) : .clear)
+                                )
+                                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                .help(tr("点击播放", "Click to play"))
+                                .onTapGesture {
+                                    viewModel.play(track: item.track, in: immersivePreviewPlaylistID)
+                                }
+                                .id(item.index)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 300)
+                    .onAppear {
+                        scrollImmersivePlaylistPreviewToCurrent(using: proxy, animated: false)
+                    }
+                    .onChange(of: immersivePreviewCurrentIndex) { _ in
+                        scrollImmersivePlaylistPreviewToCurrent(using: proxy, animated: true)
+                    }
+                    .onChange(of: immersivePreviewPlaylistID) { _ in
+                        scrollImmersivePlaylistPreviewToCurrent(using: proxy, animated: false)
+                    }
+                    .onChange(of: isImmersivePlaylistPreviewPresented) { isPresented in
+                        guard isPresented else { return }
+                        scrollImmersivePlaylistPreviewToCurrent(using: proxy, animated: false)
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .frame(width: 320, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(theme.backgroundBottom.opacity(0.96))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(theme.border.opacity(0.28), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.14), radius: 18, x: 0, y: 12)
+        .onHover { hovering in
+            if hovering {
+                showImmersivePlaylistPreview()
+            } else {
+                scheduleImmersivePlaylistPreviewHide()
+            }
+        }
+    }
+
+    private func immersiveHeaderIconButton(
+        systemName: String,
+        helpText: String,
+        emphasized: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            immersiveIconLabel(systemName: systemName, emphasized: emphasized)
+        }
+        .buttonStyle(.plain)
+        .help(helpText)
+    }
+
+    private func showImmersivePlaylistPreview() {
+        immersivePlaylistPreviewHideToken = UUID()
+        withAnimation(.easeInOut(duration: 0.16)) {
+            isImmersivePlaylistPreviewPresented = true
+        }
+    }
+
+    private func scheduleImmersivePlaylistPreviewHide() {
+        let token = UUID()
+        immersivePlaylistPreviewHideToken = token
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+            guard immersivePlaylistPreviewHideToken == token else { return }
+            withAnimation(.easeInOut(duration: 0.16)) {
+                isImmersivePlaylistPreviewPresented = false
+            }
+        }
+    }
+
+    private var immersivePreviewSubtitle: String {
+        if let currentIndex = immersivePreviewCurrentIndex {
+            return tr(
+                "\(immersivePreviewPlaylistName) · 正在播放第 \(currentIndex + 1) / \(immersivePreviewTrackCount) 首",
+                "\(immersivePreviewPlaylistName) · playing \(currentIndex + 1) of \(immersivePreviewTrackCount)"
+            )
+        }
+
+        return "\(immersivePreviewPlaylistName) · \(tr("\(immersivePreviewTrackCount) 首歌曲", "\(immersivePreviewTrackCount) tracks"))"
+    }
+
+    private func scrollImmersivePlaylistPreviewToCurrent(using proxy: ScrollViewProxy, animated: Bool) {
+        guard isImmersivePlaylistPreviewPresented, let currentIndex = immersivePreviewCurrentIndex else { return }
+
+        let scrollAction = {
+            proxy.scrollTo(currentIndex, anchor: .center)
+        }
+
+        if animated {
+            withAnimation(.easeInOut(duration: 0.22)) {
+                scrollAction()
+            }
+        } else {
+            DispatchQueue.main.async {
+                scrollAction()
+            }
+        }
+    }
+
+    private func isImmersivePreviewTrackCurrent(_ index: Int) -> Bool {
+        viewModel.currentPlayingPlaylistID == immersivePreviewPlaylist?.id && viewModel.currentIndex == index
+    }
+
+    private func isImmersivePreviewTrackQueued(_ track: AudioTrack) -> Bool {
+        viewModel.queuedTrackPaths.contains(track.url.standardizedFileURL.path)
+    }
+
+    private func immersiveIconLabel(systemName: String, emphasized: Bool = false, compact: Bool = false) -> some View {
+        Image(systemName: systemName)
+            .symbolRenderingMode(.monochrome)
+            .font(
+                .system(
+                    size: compact ? (emphasized ? 18 : 14) : (emphasized ? 20 : 16),
+                    weight: emphasized ? .bold : .semibold
+                )
+            )
+            .foregroundStyle(emphasized ? theme.accent : theme.primaryText)
+            .frame(
+                width: compact ? (emphasized ? 28 : 22) : (emphasized ? 30 : 24),
+                height: compact ? (emphasized ? 28 : 22) : (emphasized ? 30 : 24)
+            )
+    }
+
+    private func immersiveTrackInfoSection(titleFontSize: CGFloat) -> some View {
+        VStack(spacing: 6) {
+            Text(viewModel.currentTrack?.title ?? tr("未选择歌曲", "No Track Selected"))
+                .font(.system(size: titleFontSize, weight: .bold, design: .rounded))
+                .lineLimit(1)
+                .multilineTextAlignment(.center)
+                .minimumScaleFactor(0.72)
+
+            Text(viewModel.currentTrack?.album ?? tr("未知专辑", "Unknown Album"))
+                .font(.body.weight(.medium))
+                .foregroundStyle(theme.primaryText.opacity(0.90))
+                .multilineTextAlignment(.center)
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+
+            Text(viewModel.currentTrack?.artist ?? tr("未知艺术家", "Unknown Artist"))
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(theme.secondaryText)
+                .multilineTextAlignment(.center)
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+
+            Text(immersiveTechnicalSummary)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(theme.secondaryText)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .minimumScaleFactor(0.8)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func immersiveTransportSection(maxWidth: CGFloat, compact: Bool) -> some View {
+        VStack(spacing: compact ? 10 : 12) {
+            transportSlider
+                .frame(maxWidth: maxWidth)
+
+            HStack(spacing: compact ? 18 : 24) {
+                immersiveTransportButton(
+                    systemName: viewModel.playbackMode.symbolName,
+                    helpText: viewModel.playbackMode.title(in: language),
+                    compact: compact
+                ) {
+                    viewModel.cyclePlaybackMode()
+                }
+
+                immersiveTransportButton(
+                    systemName: "backward.fill",
+                    helpText: tr("上一首", "Previous"),
+                    compact: compact
+                ) {
+                    viewModel.playPrevious()
+                }
+
+                immersiveTransportButton(
+                    systemName: viewModel.isPlaying ? "pause.fill" : "play.fill",
+                    helpText: viewModel.isPlaying ? tr("暂停", "Pause") : tr("播放", "Play"),
+                    emphasized: true,
+                    compact: compact
+                ) {
+                    viewModel.togglePlayback()
+                }
+                .keyboardShortcut(.space, modifiers: [])
+
+                immersiveTransportButton(
+                    systemName: "forward.fill",
+                    helpText: tr("下一首", "Next"),
+                    compact: compact
+                ) {
+                    viewModel.playNext()
+                }
+
+                immersivePlaybackRateControl(compact: compact)
+
+                immersiveVolumeControl(compact: compact)
+            }
+            .frame(maxWidth: maxWidth)
+        }
+    }
+
+    private func immersiveTransportButton(
+        systemName: String,
+        helpText: String,
+        emphasized: Bool = false,
+        compact: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            immersiveIconLabel(systemName: systemName, emphasized: emphasized, compact: compact)
+        }
+        .buttonStyle(.plain)
+        .help(helpText)
+    }
+
+    private func immersiveVolumeControl(compact: Bool) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.22)) {
+                isImmersiveVolumeExpanded.toggle()
+            }
+        } label: {
+            immersiveIconLabel(systemName: "speaker.wave.2.fill", compact: compact)
+        }
+        .buttonStyle(.plain)
+        .help(tr("显示音量滑块", "Show volume slider"))
+        .overlay(alignment: .leading) {
+            if isImmersiveVolumeExpanded {
+                Slider(value: $viewModel.volume, in: 0...1)
+                    .frame(width: compact ? 96 : 112)
+                    .controlSize(.small)
+                    .offset(x: compact ? 34 : 38)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .zIndex(isImmersiveVolumeExpanded ? 1 : 0)
+    }
+
+    private var playbackRateControl: some View {
+        Menu {
+            playbackRateMenuContent
+        } label: {
+            Label(viewModel.playbackRateDisplayText, systemImage: "speedometer")
+        }
+        .help(tr("播放倍速", "Playback speed"))
+    }
+
+    private func immersivePlaybackRateControl(compact: Bool) -> some View {
+        Menu {
+            playbackRateMenuContent
+        } label: {
+            Text(viewModel.playbackRateDisplayText)
+                .font(.system(size: compact ? 13 : 14, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(viewModel.playbackRate == 1.0 ? theme.primaryText : theme.accent)
+                .frame(width: compact ? 42 : 46, height: compact ? 22 : 24)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .help(tr("播放倍速", "Playback speed"))
+    }
+
+    @ViewBuilder
+    private var playbackRateMenuContent: some View {
+        ForEach(viewModel.availablePlaybackRates, id: \.self) { rate in
+            let title = viewModel.playbackRateText(for: rate)
+            Button {
+                viewModel.setPlaybackRate(rate)
+            } label: {
+                if viewModel.playbackRate == rate {
+                    Label(title, systemImage: "checkmark")
+                } else {
+                    Text(title)
+                }
+            }
+        }
+    }
+
+    private var immersiveTechnicalTags: [String] {
+        var items: [String] = []
+
+        if let bitRate = viewModel.currentBitRateKbps {
+            items.append("\(bitRate) kbps")
+        }
+
+        if viewModel.playbackSampleRate > 0 {
+            items.append(formattedSampleRate(viewModel.playbackSampleRate))
+        }
+
+        if viewModel.currentChannelCount > 0 {
+            items.append(channelDescription(viewModel.currentChannelCount))
+        }
+
+        if let format = viewModel.currentTrack?.fileExtension, !format.isEmpty {
+            items.append(format)
+        }
+
+        if items.isEmpty {
+            items.append(tr("等待加载", "Loading"))
+        }
+
+        return items
+    }
+
+    private var immersiveTechnicalSummary: String {
+        let baseSummary = immersiveTechnicalTags.joined(separator: " · ")
+        if viewModel.duration > 0 {
+            return baseSummary + " · " + viewModel.formatTime(viewModel.duration)
+        }
+        return baseSummary
+    }
+
+    private func formattedSampleRate(_ sampleRate: Double) -> String {
+        let kiloHertz = sampleRate / 1_000
+        if kiloHertz >= 100 {
+            return String(format: "%.0f kHz", kiloHertz)
+        }
+        return String(format: "%.1f kHz", kiloHertz)
+    }
+
+    private func channelDescription(_ channelCount: Int) -> String {
+        switch channelCount {
+        case 1:
+            return tr("单声道", "Mono")
+        case 2:
+            return tr("立体声", "Stereo")
+        default:
+            return tr("\(channelCount) 声道", "\(channelCount) ch")
+        }
+    }
+
+    private var playlistSwitcherWidth: CGFloat {
+        switch viewModel.interfaceMode {
+        case .compact:
+            return 126
+        case .full:
+            return 140
+        case .immersive:
+            return 190
+        }
+    }
+
+    private func clamp(_ value: CGFloat, min lower: CGFloat, max upper: CGFloat) -> CGFloat {
+        Swift.min(Swift.max(value, lower), upper)
+    }
+
+    private func immersiveToggleArtworkButton(size: CGFloat, cornerRadius: CGFloat) -> some View {
+        Button {
+            viewModel.toggleImmersiveMode()
+        } label: {
+            artworkView(size: size, cornerRadius: cornerRadius)
+        }
+        .buttonStyle(.plain)
+        .help(tr("点击封面进入沉浸式模式", "Click the artwork to enter immersive mode"))
+    }
+
+    private func immersiveLyricsPanel(
+        contentPadding: CGFloat,
+        rowSpacing: CGFloat,
+        prominentFontSize: CGFloat,
+        regularFontSize: CGFloat,
+        timestampWidth: CGFloat
+    ) -> some View {
+        lyricsContent(
+            rowSpacing: rowSpacing,
+            prominentFontSize: prominentFontSize,
+            regularFontSize: regularFontSize,
+            timestampWidth: timestampWidth,
+            showsRowBackgrounds: false,
+            showsScrollIndicators: false
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .mask {
+            LinearGradient(
+                stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .black, location: 0.08),
+                    .init(color: .black, location: 0.92),
+                    .init(color: .clear, location: 1)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        }
+        .padding(.vertical, contentPadding)
+        .padding(.horizontal, contentPadding * 0.2)
+    }
+
+    private var lyricsPanel: some View {
+        lyricsPanelCard(
+            contentPadding: 22,
+            titleFont: .headline,
+            rowSpacing: 10,
+            prominentFontSize: 28,
+            regularFontSize: 20,
+            timestampWidth: 46
+        )
+    }
+
+    private func lyricsPanelCard(
+        contentPadding: CGFloat,
+        titleFont: Font,
+        rowSpacing: CGFloat,
+        prominentFontSize: CGFloat,
+        regularFontSize: CGFloat,
+        timestampWidth: CGFloat
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(tr("歌词", "Lyrics"))
+                .font(titleFont)
+
+            lyricsContent(
+                rowSpacing: rowSpacing,
+                prominentFontSize: prominentFontSize,
+                regularFontSize: regularFontSize,
+                timestampWidth: timestampWidth
+            )
+        }
+        .padding(contentPadding)
         .background(panelBackground(primary: false))
+    }
+
+    @ViewBuilder
+    private func lyricsContent(
+        rowSpacing: CGFloat,
+        prominentFontSize: CGFloat,
+        regularFontSize: CGFloat,
+        timestampWidth: CGFloat,
+        showsRowBackgrounds: Bool = true,
+        showsScrollIndicators: Bool = true
+    ) -> some View {
+        if !viewModel.lyrics.timedLines.isEmpty {
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: showsScrollIndicators) {
+                    LazyVStack(alignment: .leading, spacing: rowSpacing) {
+                        ForEach(Array(viewModel.lyrics.timedLines.enumerated()), id: \.element.id) { index, line in
+                            LyricJumpRow(
+                                text: line.text,
+                                time: line.time,
+                                prominent: index == viewModel.currentLyricIndex,
+                                theme: theme,
+                                prominentFontSize: prominentFontSize,
+                                regularFontSize: regularFontSize,
+                                timestampWidth: timestampWidth,
+                                showsBackgrounds: showsRowBackgrounds,
+                                onSelect: {
+                                    lyricScrollAnchor = UnitPoint(x: 0.5, y: 0.68)
+                                    withAnimation(.easeInOut(duration: 0.22)) {
+                                        proxy.scrollTo(index, anchor: lyricScrollAnchor)
+                                    }
+                                    viewModel.seekToTime(line.time)
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                                        lyricScrollAnchor = .center
+                                    }
+                                }
+                            )
+                            .id(index)
+                            .animation(suppressLyricAutoScrollAnimation ? nil : .easeInOut(duration: 0.16), value: viewModel.currentLyricIndex)
+                        }
+                    }
+                    .padding(.vertical, 24)
+                }
+                .onAppear {
+                    if let index = viewModel.currentLyricIndex {
+                        scrollLyrics(with: proxy, to: index, anchor: .center, animated: false)
+                    }
+                }
+                .onChange(of: viewModel.currentLyricIndex) { newValue in
+                    guard let newValue else { return }
+                    scrollLyrics(with: proxy, to: newValue, anchor: lyricScrollAnchor, animated: !suppressLyricAutoScrollAnimation)
+                    if suppressLyricAutoScrollAnimation {
+                        DispatchQueue.main.async {
+                            suppressLyricAutoScrollAnimation = false
+                        }
+                    }
+                }
+            }
+        } else if let plainText = viewModel.lyrics.plainText, !plainText.isEmpty {
+            ScrollView(.vertical, showsIndicators: showsScrollIndicators) {
+                Text(plainText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .foregroundStyle(theme.primaryText)
+                    .textSelection(.enabled)
+            }
+        } else {
+            Spacer()
+            Text(tr("当前歌曲未找到歌词文件。\n将同名 `.lrc` 或 `.txt` 放在音频文件旁即可自动加载。", "No lyrics were found for the current track.\nPlace a matching `.lrc` or `.txt` file next to the audio file to load it automatically."))
+                .foregroundStyle(theme.secondaryText)
+            Spacer()
+        }
     }
 
     private var transportSlider: some View {
@@ -974,9 +1905,30 @@ struct ContentView: View {
         ].joined(separator: " · ")
     }
 
+    private func scrollLyrics(with proxy: ScrollViewProxy, to index: Int, anchor: UnitPoint, animated: Bool) {
+        let action = {
+            proxy.scrollTo(index, anchor: anchor)
+        }
+
+        if animated {
+            withAnimation(.easeInOut(duration: 0.24)) {
+                action()
+            }
+            return
+        }
+
+        var transaction = Transaction()
+        transaction.animation = nil
+        withTransaction(transaction) {
+            action()
+        }
+    }
+
     private var backgroundView: some View {
         ZStack {
-            if viewModel.appTheme == .customImage, let backgroundImage = viewModel.customBackgroundImage {
+            if viewModel.interfaceMode == .immersive {
+                theme.backgroundBottom
+            } else if viewModel.appTheme == .customImage, let backgroundImage = viewModel.customBackgroundImage {
                 Image(nsImage: backgroundImage)
                     .resizable()
                     .scaledToFill()
@@ -1017,6 +1969,25 @@ struct ContentView: View {
         } label: {
             Image(systemName: "paintpalette")
         }
+        .labelStyle(.iconOnly)
+        .fixedSize()
+    }
+
+    private var dataTransferMenu: some View {
+        Menu {
+            Button(tr("导出个人数据", "Export Personal Data")) {
+                viewModel.exportPersonalData()
+            }
+
+            Button(tr("导入个人数据", "Import Personal Data")) {
+                viewModel.importPersonalData()
+            }
+        } label: {
+            Image(systemName: "arrow.up.arrow.down")
+                .symbolRenderingMode(.monochrome)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
         .labelStyle(.iconOnly)
         .fixedSize()
     }
@@ -1090,27 +2061,12 @@ struct ContentView: View {
     }
 
     private func artworkView(size: CGFloat, cornerRadius: CGFloat) -> some View {
-        Group {
-            if let artwork = viewModel.currentArtwork {
-                Image(nsImage: artwork)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                ZStack {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(theme.accentSoft)
-                    Image(systemName: "music.note")
-                        .font(.system(size: max(size * 0.32, 24), weight: .bold))
-                        .foregroundStyle(theme.accent)
-                        .shadow(color: theme.primaryShadow, radius: usesImageBackground ? 8 : 0)
-                }
-            }
-        }
-        .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .stroke(theme.border, lineWidth: 1)
+        AlbumArtworkView(
+            artwork: viewModel.currentArtwork,
+            theme: theme,
+            usesImageBackground: usesImageBackground,
+            size: size,
+            cornerRadius: cornerRadius
         )
     }
 
@@ -1250,9 +2206,15 @@ struct ContentView: View {
     private func resizeWindowIfNeeded(for mode: PlayerViewModel.InterfaceMode) {
         guard let window = hostWindow else { return }
 
-        let targetSize = mode == .compact
-            ? NSSize(width: 420, height: 760)
-            : NSSize(width: 1360, height: 860)
+        let targetSize: NSSize
+        switch mode {
+        case .compact:
+            targetSize = NSSize(width: 420, height: 760)
+        case .full:
+            targetSize = NSSize(width: 1360, height: 860)
+        case .immersive:
+            targetSize = NSSize(width: 1180, height: 740)
+        }
 
         let newFrame = window.frameRect(forContentRect: NSRect(origin: .zero, size: targetSize))
         var frame = window.frame
@@ -1285,11 +2247,173 @@ private struct WindowAccessor: NSViewRepresentable {
     }
 }
 
+private struct AlbumArtworkView: View {
+    let artwork: NSImage?
+    let theme: PlayerTheme
+    let usesImageBackground: Bool
+    let size: CGFloat
+    let cornerRadius: CGFloat
+    var isCircular = false
+    var showsBorder = true
+
+    var body: some View {
+        if isCircular {
+            artworkContent
+                .frame(width: size, height: size)
+                .clipShape(Circle())
+                .overlay {
+                    if showsBorder {
+                        Circle()
+                            .stroke(theme.border, lineWidth: 1)
+                    }
+                }
+        } else {
+            artworkContent
+                .frame(width: size, height: size)
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                .overlay {
+                    if showsBorder {
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .stroke(theme.border, lineWidth: 1)
+                    }
+                }
+        }
+    }
+
+    @ViewBuilder
+    private var artworkContent: some View {
+        ZStack {
+            if let artwork {
+                Image(nsImage: artwork)
+                    .resizable()
+                    .scaledToFill()
+                    .id(artworkTransitionID(for: artwork))
+                    .transition(.opacity)
+            } else {
+                placeholderArtwork
+                    .id("artwork-placeholder")
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.22), value: artwork.map(artworkTransitionID(for:)) ?? "artwork-placeholder")
+    }
+
+    @ViewBuilder
+    private var placeholderArtwork: some View {
+        ZStack {
+            if isCircular {
+                Circle()
+                    .fill(theme.accentSoft)
+            } else {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(theme.accentSoft)
+            }
+
+            Image(systemName: "music.note")
+                .font(.system(size: max(size * 0.32, 24), weight: .bold))
+                .foregroundStyle(theme.accent)
+                .shadow(color: theme.primaryShadow, radius: usesImageBackground ? 8 : 0)
+        }
+    }
+
+    private func artworkTransitionID(for artwork: NSImage) -> String {
+        String(describing: ObjectIdentifier(artwork))
+    }
+}
+
+private struct SpinningVinylDisc: View {
+    let artwork: NSImage?
+    let theme: PlayerTheme
+    let usesImageBackground: Bool
+    let size: CGFloat
+    let isPlaying: Bool
+    let tapHint: String
+    let onTap: () -> Void
+
+    @State private var anchoredRotation: Double = 0
+    @State private var rotationStartDate = Date()
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+            let angle = rotationAngle(at: context.date)
+
+            ZStack {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [
+                                Color.white.opacity(0.14),
+                                Color.black.opacity(0.96),
+                                Color.black
+                            ],
+                            center: .center,
+                            startRadius: size * 0.03,
+                            endRadius: size * 0.54
+                        )
+                    )
+
+                ForEach(0..<8, id: \.self) { index in
+                    Circle()
+                        .stroke(Color.white.opacity(index.isMultiple(of: 2) ? 0.05 : 0.03), lineWidth: max(size * 0.008, 1))
+                        .padding(size * (0.11 + CGFloat(index) * 0.05))
+                }
+
+                Circle()
+                    .stroke(theme.accent.opacity(0.18), lineWidth: max(size * 0.018, 2))
+                    .padding(size * 0.22)
+
+                Capsule()
+                    .fill(theme.accent.opacity(0.30))
+                    .frame(width: size * 0.14, height: max(size * 0.012, 3))
+                    .blur(radius: max(size * 0.01, 2))
+                    .offset(y: -size * 0.26)
+
+                Button(action: onTap) {
+                    AlbumArtworkView(
+                        artwork: artwork,
+                        theme: theme,
+                        usesImageBackground: usesImageBackground,
+                        size: size * 0.35,
+                        cornerRadius: size * 0.08,
+                        isCircular: true,
+                        showsBorder: false
+                    )
+                }
+                .buttonStyle(.plain)
+                .help(tapHint)
+
+                Circle()
+                    .fill(theme.primaryText.opacity(0.9))
+                    .frame(width: size * 0.028, height: size * 0.028)
+            }
+            .rotationEffect(.degrees(angle))
+        }
+        .frame(width: size, height: size)
+        .onAppear {
+            rotationStartDate = Date()
+        }
+        .onChange(of: isPlaying) { _ in
+            anchoredRotation = rotationAngle(at: Date())
+            rotationStartDate = Date()
+        }
+    }
+
+    private func rotationAngle(at date: Date) -> Double {
+        guard isPlaying else { return anchoredRotation }
+        let degreesPerSecond = 360.0 / 18.0
+        return anchoredRotation + date.timeIntervalSince(rotationStartDate) * degreesPerSecond
+    }
+}
+
 private struct LyricJumpRow: View {
     let text: String
     let time: TimeInterval
     let prominent: Bool
     let theme: PlayerTheme
+    let prominentFontSize: CGFloat
+    let regularFontSize: CGFloat
+    let timestampWidth: CGFloat
+    let showsBackgrounds: Bool
     let onSelect: () -> Void
 
     @State private var isHovered = false
@@ -1300,10 +2424,10 @@ private struct LyricJumpRow: View {
                 Text(formatLyricTimestamp(time))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(prominent ? theme.accent : (isHovered ? theme.accent : theme.secondaryText))
-                    .frame(width: 46, alignment: .leading)
+                    .frame(width: timestampWidth, alignment: .leading)
 
                 Text(text)
-                    .font(prominent ? .system(size: 28, weight: .bold) : .title3.weight(.medium))
+                    .font(prominent ? .system(size: prominentFontSize, weight: .bold) : .system(size: regularFontSize, weight: .medium))
                     .foregroundStyle(prominent ? theme.accent : theme.primaryText.opacity(isHovered ? 0.88 : 0.72))
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1316,12 +2440,12 @@ private struct LyricJumpRow: View {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(isHovered ? theme.accent.opacity(0.35) : .clear, lineWidth: 1)
+                    .stroke(showsBackgrounds && isHovered ? theme.accent.opacity(0.35) : .clear, lineWidth: 1)
             )
             .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(.plain)
-        .scaleEffect(isHovered && !prominent ? 1.01 : 1)
+        .scaleEffect(showsBackgrounds && isHovered && !prominent ? 1.01 : 1)
         .animation(.easeInOut(duration: 0.16), value: isHovered)
         .onHover { hovering in
             isHovered = hovering
@@ -1329,6 +2453,7 @@ private struct LyricJumpRow: View {
     }
 
     private var backgroundFill: Color {
+        guard showsBackgrounds else { return .clear }
         if prominent {
             return theme.lyricGlow
         }
@@ -1343,6 +2468,135 @@ private struct LyricJumpRow: View {
         let minutes = totalSeconds / 60
         let seconds = totalSeconds % 60
         return String(format: "%02d:%02d", minutes, seconds)
+    }
+}
+
+private struct EqualizerBandCard: View {
+    let band: EqualizerBandSetting
+    let theme: PlayerTheme
+    let isEnabled: Bool
+    let isImmersive: Bool
+    let onChange: (Double) -> Void
+
+    var body: some View {
+        VStack(spacing: isImmersive ? 8 : 10) {
+            Text(String(format: "%+.1f", band.gain) + " dB")
+                .font(.caption2.monospacedDigit().weight(.semibold))
+                .foregroundStyle(abs(band.gain) > 0.1 ? theme.accent : theme.secondaryText)
+
+            EqualizerBandFader(
+                value: Double(band.gain),
+                theme: theme,
+                isEnabled: isEnabled,
+                isImmersive: isImmersive,
+                onChange: onChange
+            )
+            .frame(width: isImmersive ? 34 : 38, height: isImmersive ? 138 : 150)
+
+            Text(band.label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(theme.secondaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+        .padding(.horizontal, isImmersive ? 8 : 10)
+        .padding(.vertical, isImmersive ? 12 : 14)
+        .frame(width: isImmersive ? 62 : 70)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(cardFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(borderColor, lineWidth: 1)
+        )
+    }
+
+    private var cardFill: LinearGradient {
+        LinearGradient(
+            colors: [
+                theme.panel.opacity(isImmersive ? 0.48 : 0.82),
+                theme.panelSecondary.opacity(isImmersive ? 0.72 : 0.9)
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+    }
+
+    private var borderColor: Color {
+        isEnabled ? theme.accent.opacity(0.14) : theme.border.opacity(0.75)
+    }
+}
+
+private struct EqualizerBandFader: View {
+    let value: Double
+    let theme: PlayerTheme
+    let isEnabled: Bool
+    let isImmersive: Bool
+    let onChange: (Double) -> Void
+
+    private let range: ClosedRange<Double> = -12...12
+
+    var body: some View {
+        GeometryReader { geometry in
+            let height = geometry.size.height
+            let trackWidth = geometry.size.width
+            let progress = CGFloat((value - range.lowerBound) / (range.upperBound - range.lowerBound))
+            let clampedProgress = min(max(progress, 0), 1)
+            let knobY = height * (1 - clampedProgress)
+            let centerY = height / 2
+            let activeHeight = max(abs(centerY - knobY) + 10, 10)
+            let activeOffset = ((centerY + knobY) / 2) - centerY
+            let knobOffset = knobY - centerY
+
+            ZStack {
+                Capsule(style: .continuous)
+                    .fill(theme.primaryText.opacity(isImmersive ? 0.09 : 0.08))
+
+                Capsule(style: .continuous)
+                    .fill(theme.accentSoft.opacity(isEnabled ? 0.18 : 0.08))
+                    .frame(width: trackWidth * 0.44)
+
+                Rectangle()
+                    .fill(theme.primaryText.opacity(0.16))
+                    .frame(width: trackWidth * 0.8, height: 1.2)
+
+                Capsule(style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                theme.accent.opacity(isEnabled ? 0.82 : 0.3),
+                                theme.accentSoft.opacity(isEnabled ? 0.98 : 0.18)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .frame(width: trackWidth * 0.5, height: activeHeight)
+                    .offset(y: activeOffset)
+
+                Circle()
+                    .fill(theme.primaryText.opacity(isEnabled ? 0.98 : 0.7))
+                    .frame(width: trackWidth * 0.62, height: trackWidth * 0.62)
+                    .overlay(
+                        Circle()
+                            .stroke(theme.accent.opacity(isEnabled ? 0.45 : 0.14), lineWidth: 2)
+                    )
+                    .shadow(color: isEnabled ? theme.accent.opacity(0.22) : .clear, radius: 8, x: 0, y: 4)
+                    .offset(y: knobOffset)
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { drag in
+                        let clampedY = min(max(drag.location.y, 0), height)
+                        let dragProgress = 1 - (clampedY / height)
+                        let rawValue = range.lowerBound + Double(dragProgress) * (range.upperBound - range.lowerBound)
+                        let steppedValue = (rawValue * 2).rounded() / 2
+                        onChange(min(max(steppedValue, range.lowerBound), range.upperBound))
+                    }
+            )
+        }
     }
 }
 

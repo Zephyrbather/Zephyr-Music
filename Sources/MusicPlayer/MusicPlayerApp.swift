@@ -260,10 +260,38 @@ struct MusicPlayerApp: App {
                     Button {
                         viewModel.applyEqualizerPreset(preset)
                     } label: {
-                        if viewModel.selectedEqualizerPreset == preset {
+                        if viewModel.selectedUserEqualizerPresetID == nil && viewModel.selectedEqualizerPreset == preset {
                             Label(preset.title(in: language), systemImage: "checkmark")
                         } else {
                             Text(preset.title(in: language))
+                        }
+                    }
+                }
+
+                if !viewModel.userEqualizerPresets.isEmpty {
+                    Divider()
+
+                    ForEach(viewModel.userEqualizerPresets) { preset in
+                        Button {
+                            viewModel.applySavedEqualizerPreset(preset.id)
+                        } label: {
+                            if viewModel.selectedUserEqualizerPresetID == preset.id {
+                                Label(preset.name, systemImage: "checkmark")
+                            } else {
+                                Text(preset.name)
+                            }
+                        }
+                    }
+
+                    Divider()
+
+                    Menu(language.pick("删除自定义预设", "Delete Saved Preset")) {
+                        ForEach(viewModel.userEqualizerPresets) { preset in
+                            Button(role: .destructive) {
+                                viewModel.removeSavedEqualizerPreset(preset.id)
+                            } label: {
+                                Text(preset.name)
+                            }
                         }
                     }
                 }
@@ -274,6 +302,26 @@ struct MusicPlayerApp: App {
 
                 Button(language.pick("重置均衡器", "Reset Equalizer")) {
                     viewModel.resetEqualizer()
+                }
+
+                Button(language.pick("保存当前风格", "Save Current Style")) {
+                    viewModel.promptToSaveCurrentEqualizerPreset()
+                }
+
+                if let selectedSavedPreset = viewModel.selectedSavedEqualizerPreset {
+                    Button(language.pick("删除当前风格", "Delete Current Style"), role: .destructive) {
+                        viewModel.removeSavedEqualizerPreset(selectedSavedPreset.id)
+                    }
+                }
+            }
+
+            CommandMenu(language.pick("数据", "Data")) {
+                Button(language.pick("导出个人数据", "Export Personal Data")) {
+                    viewModel.exportPersonalData()
+                }
+
+                Button(language.pick("导入个人数据", "Import Personal Data")) {
+                    viewModel.importPersonalData()
                 }
             }
 

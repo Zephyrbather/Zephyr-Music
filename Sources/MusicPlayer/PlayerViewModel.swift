@@ -11,6 +11,18 @@ struct EqualizerBandSetting: Identifiable, Equatable {
     var gain: Float
 }
 
+struct SavedEqualizerPreset: Identifiable, Codable, Equatable {
+    let id: UUID
+    var name: String
+    var gains: [Float]
+
+    init(id: UUID = UUID(), name: String, gains: [Float]) {
+        self.id = id
+        self.name = name
+        self.gains = gains
+    }
+}
+
 struct PlaylistCollection: Identifiable, Equatable {
     let id: UUID
     var name: String
@@ -76,7 +88,9 @@ private struct PersistedAppState: Codable {
     let appLanguage: String?
     let playbackMode: String
     let interfaceMode: String
+    let lastStandardInterfaceMode: String?
     let volume: Float
+    let playbackRate: Float?
     let isDesktopLyricsVisible: Bool
     let desktopLyricsFontSize: Double
     let desktopLyricsOpacity: Double
@@ -90,6 +104,8 @@ private struct PersistedAppState: Codable {
     let appTheme: String
     let customBackgroundImagePath: String?
     let queuedTracks: [PersistedQueuedTrack]?
+    let userEqualizerPresets: [SavedEqualizerPreset]?
+    let selectedUserEqualizerPresetID: UUID?
     let playbackState: PersistedPlaybackState
 }
 
@@ -101,6 +117,20 @@ private struct PersistedQueuedTrack: Codable {
 private struct PersistedSecurityScopedBookmark: Codable {
     let path: String
     let data: Data
+}
+
+private struct ExportedBackgroundAsset: Codable {
+    let originalFileName: String
+    let data: Data
+}
+
+private struct ExportedUserDataPackage: Codable {
+    let version: Int
+    let exportedAt: Date
+    let appState: PersistedAppState
+    let listeningHistory: [ListeningHistoryRecord]
+    let securityScopedBookmarks: [PersistedSecurityScopedBookmark]
+    let backgroundAsset: ExportedBackgroundAsset?
 }
 
 struct ListeningHistoryRecord: Codable, Identifiable {
@@ -203,6 +233,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
     enum InterfaceMode: String, CaseIterable, Identifiable {
         case full = "完整模式"
         case compact = "简洁模式"
+        case immersive = "沉浸式模式"
 
         var id: String { rawValue }
 
@@ -212,6 +243,8 @@ final class PlayerViewModel: NSObject, ObservableObject {
                 return "rectangle.split.2x1"
             case .compact:
                 return "rectangle.portrait"
+            case .immersive:
+                return "sparkles"
             }
         }
     }
@@ -223,6 +256,10 @@ final class PlayerViewModel: NSObject, ObservableObject {
         case pop = "pop"
         case rock = "rock"
         case classical = "classical"
+        case musicHall = "music_hall"
+        case studio = "studio"
+        case ktv = "ktv"
+        case concert = "concert"
 
         var id: String { rawValue }
 
@@ -240,6 +277,14 @@ final class PlayerViewModel: NSObject, ObservableObject {
                 self = .rock
             case "古典", "classical":
                 self = .classical
+            case "音乐厅", "music_hall":
+                self = .musicHall
+            case "录音棚", "studio":
+                self = .studio
+            case "KTV", "ktv":
+                self = .ktv
+            case "演唱会", "concert":
+                self = .concert
             default:
                 self = .custom
             }
@@ -249,6 +294,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
     private static let supportedExtensions = Set(["flac", "wav", "mp3", "dsf", "dff", "dsd"])
     private static let defaultPlaylistName = "默认歌单"
     private static let defaultPlaylistEnglishName = "Default Playlist"
+    private static let supportedPlaybackRates: [Float] = [0.75, 1.0, 1.25, 1.5, 2.0]
 
     @Published private(set) var playlists: [PlaylistCollection] = [PlaylistCollection(name: defaultPlaylistName)]
     @Published private(set) var queuedTrackPaths: [String] = []
@@ -269,7 +315,13 @@ final class PlayerViewModel: NSObject, ObservableObject {
     @Published var desktopLyricsDisplayMode: DesktopLyricsDisplayMode = .dualLine
     @Published var desktopLyricsBackgroundStyle: DesktopLyricsBackgroundStyle = .themed
     @Published var playbackMode: PlaybackMode = .sequential
-    @Published var interfaceMode: InterfaceMode = .compact
+    @Published var interfaceMode: InterfaceMode = .compact {
+        didSet {
+            if interfaceMode != .immersive {
+                lastStandardInterfaceMode = interfaceMode
+            }
+        }
+    }
     @Published var appLanguage: AppLanguage = .chinese
     @Published var playlistSearchFocusRequest = 0
     @Published var listeningHistoryPresentationRequest = 0
@@ -281,10 +333,17 @@ final class PlayerViewModel: NSObject, ObservableObject {
     }
     @Published var isEqualizerExpanded = false
     @Published var selectedEqualizerPreset: EqualizerPreset = .custom
+    @Published private(set) var selectedUserEqualizerPresetID: UUID?
+    @Published private(set) var userEqualizerPresets: [SavedEqualizerPreset] = []
     @Published var equalizerBands = PlayerViewModel.makeDefaultEqualizerBands() {
         didSet { applyEqualizerSettings() }
     }
     @Published private(set) var listeningHistory: [ListeningHistoryRecord] = []
+    @Published private(set) var playbackRate: Float = 1.0 {
+        didSet {
+            applyPlaybackRate()
+        }
+    }
     @Published var volume: Float = 0.8 {
         didSet {
             playerNode.volume = volume
@@ -293,10 +352,13 @@ final class PlayerViewModel: NSObject, ObservableObject {
 
     private let audioEngine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
+    private let timePitchNode = AVAudioUnitTimePitch()
     private let equalizerNode = AVAudioUnitEQ(numberOfBands: 10)
 
     private var currentAudioFile: AVAudioFile?
     private var currentSampleRate: Double = 44_100
+    private var currentTrackBitRateKbps: Double?
+    private var currentChannelCountValue = 0
     private var currentStartFrame: AVAudioFramePosition = 0
     private var currentFramePosition: AVAudioFramePosition = 0
     private var scheduledPlaybackToken = UUID()
@@ -307,6 +369,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
     private var isRestoringState = false
     private var securityScopedBookmarks: [String: Data] = [:]
     private var activeSecurityScopedURLs: [String: URL] = [:]
+    private var lastStandardInterfaceMode: InterfaceMode = .compact
 
     private static let appStateDefaultsKey = "ZephyrPlayer.AppState"
     private static let listeningHistoryDefaultsKey = "ZephyrPlayer.ListeningHistory"
@@ -322,9 +385,13 @@ final class PlayerViewModel: NSObject, ObservableObject {
         configureAudioEngine()
         playerNode.volume = volume
         restorePersistedState()
+        preloadSecurityScopedAccessForAllTracks(promptIfNeeded: false)
         applyEqualizerSettings()
         configurePersistence()
         startProgressTimer()
+        DispatchQueue.main.async { [weak self] in
+            self?.preloadSecurityScopedAccessForAllTracks(promptIfNeeded: true)
+        }
     }
 
     var currentTrack: AudioTrack? {
@@ -352,6 +419,35 @@ final class PlayerViewModel: NSObject, ObservableObject {
     var progress: Double {
         guard duration > 0 else { return 0 }
         return currentTime / duration
+    }
+
+    var currentBitRateKbps: Int? {
+        currentTrackBitRateKbps.map { Int($0.rounded()) }
+    }
+
+    var selectedSavedEqualizerPreset: SavedEqualizerPreset? {
+        guard let selectedUserEqualizerPresetID else { return nil }
+        return userEqualizerPresets.first(where: { $0.id == selectedUserEqualizerPresetID })
+    }
+
+    var currentEqualizerPresetDisplayName: String {
+        selectedSavedEqualizerPreset?.name ?? selectedEqualizerPreset.title(in: appLanguage)
+    }
+
+    var currentChannelCount: Int {
+        currentChannelCountValue
+    }
+
+    var playbackSampleRate: Double {
+        currentSampleRate
+    }
+
+    var availablePlaybackRates: [Float] {
+        Self.supportedPlaybackRates
+    }
+
+    var playbackRateDisplayText: String {
+        Self.formattedPlaybackRate(playbackRate)
     }
 
     var monthlyListeningSummaries: [MonthlyListeningSummary] {
@@ -488,6 +584,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
 
         let startIndex = playlists[destinationIndex].tracks.count
         playlists[destinationIndex].tracks.append(contentsOf: additions)
+        persistSecurityScopedAccess(for: additions.map(\.url))
         enrichMetadataForNewTracks(startingAt: startIndex, in: targetPlaylistID)
     }
 
@@ -512,17 +609,19 @@ final class PlayerViewModel: NSObject, ObservableObject {
     }
 
     func addFiles(_ urls: [URL]) {
-        persistSecurityScopedAccess(for: urls.filter { !$0.hasDirectoryPath })
         let tracks = urls
             .filter { Self.supportedExtensions.contains($0.pathExtension.lowercased()) }
             .map { AudioTrack(url: $0) }
 
+        persistSecurityScopedAccess(for: urls.filter { !$0.hasDirectoryPath })
+        persistSecurityScopedAccess(for: tracks.map(\.url))
         appendTracks(tracks)
     }
 
     func addDirectories(_ urls: [URL]) {
         persistSecurityScopedAccess(for: urls.filter(\.hasDirectoryPath))
         let tracks = urls.flatMap(scanDirectory)
+        persistSecurityScopedAccess(for: tracks.map(\.url))
         appendTracks(tracks)
     }
 
@@ -576,6 +675,9 @@ final class PlayerViewModel: NSObject, ObservableObject {
 
     func updateEqualizerBandGain(at index: Int, gain: Float) {
         guard equalizerBands.indices.contains(index) else { return }
+        if selectedUserEqualizerPresetID != nil {
+            selectedUserEqualizerPresetID = nil
+        }
         if selectedEqualizerPreset != .custom {
             selectedEqualizerPreset = .custom
         }
@@ -583,13 +685,148 @@ final class PlayerViewModel: NSObject, ObservableObject {
     }
 
     func resetEqualizer() {
+        selectedUserEqualizerPresetID = nil
         selectedEqualizerPreset = .custom
         equalizerBands = Self.makeDefaultEqualizerBands()
     }
 
     func applyEqualizerPreset(_ preset: EqualizerPreset) {
+        selectedUserEqualizerPresetID = nil
         selectedEqualizerPreset = preset
         equalizerBands = Self.equalizerBands(for: preset)
+    }
+
+    func applySavedEqualizerPreset(_ id: UUID) {
+        guard let preset = userEqualizerPresets.first(where: { $0.id == id }) else { return }
+        selectedEqualizerPreset = .custom
+        selectedUserEqualizerPresetID = preset.id
+        equalizerBands = Self.equalizerBands(forGains: preset.gains)
+    }
+
+    func removeSavedEqualizerPreset(_ id: UUID) {
+        let wasSelected = selectedUserEqualizerPresetID == id
+        userEqualizerPresets.removeAll { $0.id == id }
+
+        guard wasSelected else { return }
+        selectedUserEqualizerPresetID = nil
+        selectedEqualizerPreset = .custom
+    }
+
+    func promptToSaveCurrentEqualizerPreset() {
+        let alert = NSAlert()
+        alert.messageText = appLanguage.pick("保存均衡器预设", "Save Equalizer Preset")
+        alert.informativeText = appLanguage.pick("输入一个名称，用于保存当前播放风格。", "Enter a name to save the current sound profile.")
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: appLanguage.pick("保存", "Save"))
+        alert.addButton(withTitle: appLanguage.pick("取消", "Cancel"))
+
+        let field = NSTextField(string: "")
+        field.placeholderString = appLanguage.pick("例如：夜间人声 / 通勤低频", "For example: Night Vocal / Commute Bass")
+        field.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+        alert.accessoryView = field
+
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+
+        let trimmed = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            presentModalMessage(
+                title: appLanguage.pick("名称不能为空", "Name Required"),
+                message: appLanguage.pick("请输入预设名称后再保存。", "Enter a preset name before saving."),
+                style: .warning
+            )
+            return
+        }
+
+        let savedName = saveCurrentEqualizerPreset(named: trimmed)
+        presentModalMessage(
+            title: appLanguage.pick("已保存预设", "Preset Saved"),
+            message: appLanguage.pick("当前播放风格已保存为“\(savedName)”。", "The current sound profile was saved as \"\(savedName)\"."),
+            style: .informational
+        )
+    }
+
+    @discardableResult
+    func saveCurrentEqualizerPreset(named proposedName: String) -> String {
+        let baseName = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedName = uniqueUserEqualizerPresetName(for: baseName.isEmpty ? appLanguage.pick("我的风格", "My Preset") : baseName)
+        let preset = SavedEqualizerPreset(name: resolvedName, gains: equalizerBands.map(\.gain))
+        userEqualizerPresets.append(preset)
+        selectedEqualizerPreset = .custom
+        selectedUserEqualizerPresetID = preset.id
+        return resolvedName
+    }
+
+    func exportPersonalData() {
+        guard let package = makeExportedUserDataPackage() else {
+            presentModalMessage(
+                title: appLanguage.pick("导出失败", "Export Failed"),
+                message: appLanguage.pick("当前数据无法整理为迁移包。", "The current data could not be prepared for export."),
+                style: .warning
+            )
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "ZephyrPlayer-Profile-\(Self.exportDateFormatter.string(from: Date())).json"
+
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(package)
+            try data.write(to: url, options: .atomic)
+
+            presentModalMessage(
+                title: appLanguage.pick("导出完成", "Export Complete"),
+                message: appLanguage.pick("个人数据已导出到：\n\(url.path)", "Personal data was exported to:\n\(url.path)"),
+                style: .informational
+            )
+        } catch {
+            presentModalMessage(
+                title: appLanguage.pick("导出失败", "Export Failed"),
+                message: error.localizedDescription,
+                style: .warning
+            )
+        }
+    }
+
+    func importPersonalData() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard confirmPersonalDataImport() else { return }
+
+        do {
+            let data = try Data(contentsOf: url)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let package = try decoder.decode(ExportedUserDataPackage.self, from: data)
+            try applyImportedUserData(package)
+
+            presentModalMessage(
+                title: appLanguage.pick("导入完成", "Import Complete"),
+                message: appLanguage.pick("个人数据已导入。若音频文件路径发生变化，请重新选择文件夹或音频文件。", "Personal data was imported. If your audio file paths changed, reselect the folders or audio files."),
+                style: .informational
+            )
+        } catch {
+            presentModalMessage(
+                title: appLanguage.pick("导入失败", "Import Failed"),
+                message: error.localizedDescription,
+                style: .warning
+            )
+        }
     }
 
     func createPlaylist() {
@@ -647,8 +884,24 @@ final class PlayerViewModel: NSObject, ObservableObject {
         playbackMode = modes[(current + 1) % modes.count]
     }
 
+    func setPlaybackRate(_ rate: Float) {
+        playbackRate = Self.nearestSupportedPlaybackRate(to: rate)
+    }
+
+    func playbackRateText(for rate: Float) -> String {
+        Self.formattedPlaybackRate(rate)
+    }
+
     func toggleInterfaceMode() {
+        if interfaceMode == .immersive {
+            interfaceMode = lastStandardInterfaceMode
+            return
+        }
         interfaceMode = interfaceMode == .full ? .compact : .full
+    }
+
+    func toggleImmersiveMode() {
+        interfaceMode = interfaceMode == .immersive ? lastStandardInterfaceMode : .immersive
     }
 
     func removeTracks(at offsets: IndexSet) {
@@ -690,6 +943,12 @@ final class PlayerViewModel: NSObject, ObservableObject {
     func playSelected(track: AudioTrack) {
         guard let index = playlist.firstIndex(of: track) else { return }
         playTrack(at: index, in: selectedPlaylistID)
+    }
+
+    func play(track: AudioTrack, in playlistID: UUID) {
+        guard let playlistIndex = playlists.firstIndex(where: { $0.id == playlistID }),
+              let trackIndex = playlists[playlistIndex].tracks.firstIndex(of: track) else { return }
+        playTrack(at: trackIndex, in: playlistID)
     }
 
     func togglePlayback() {
@@ -811,12 +1070,13 @@ final class PlayerViewModel: NSObject, ObservableObject {
             currentAudioFile = audioFile
             currentSampleRate = audioFile.processingFormat.sampleRate
             duration = Double(audioFile.length) / currentSampleRate
+            currentChannelCountValue = Int(audioFile.processingFormat.channelCount)
+            currentTrackBitRateKbps = estimateBitRate(for: track.url, duration: duration)
             currentPlayingPlaylistID = playlistID
             currentIndex = index
             isPlaying = false
             lyrics = LyricsDocument(timedLines: [], plainText: nil)
             currentLyricIndex = nil
-            currentArtwork = nil
             let clampedTime = min(max(startTime, 0), duration)
             let startFrame = AVAudioFramePosition(clampedTime * currentSampleRate)
             currentFramePosition = min(max(startFrame, 0), audioFile.length)
@@ -853,6 +1113,8 @@ final class PlayerViewModel: NSObject, ObservableObject {
         isPlaying = false
         duration = 0
         currentTime = 0
+        currentTrackBitRateKbps = nil
+        currentChannelCountValue = 0
         currentFramePosition = 0
         currentStartFrame = 0
         lyrics = LyricsDocument(timedLines: [], plainText: nil)
@@ -890,8 +1152,10 @@ final class PlayerViewModel: NSObject, ObservableObject {
 
     private func configureAudioEngine() {
         audioEngine.attach(playerNode)
+        audioEngine.attach(timePitchNode)
         audioEngine.attach(equalizerNode)
-        audioEngine.connect(playerNode, to: equalizerNode, format: nil)
+        audioEngine.connect(playerNode, to: timePitchNode, format: nil)
+        audioEngine.connect(timePitchNode, to: equalizerNode, format: nil)
         audioEngine.connect(equalizerNode, to: audioEngine.mainMixerNode, format: nil)
 
         let frequencies: [Float] = [31, 62, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
@@ -909,12 +1173,19 @@ final class PlayerViewModel: NSObject, ObservableObject {
         equalizerBands = zip(frequencies.indices, zip(frequencies, labels)).map { index, pair in
             EqualizerBandSetting(id: index, frequency: pair.0, label: pair.1, gain: 0)
         }
+        applyPlaybackRate()
 
         do {
             try audioEngine.start()
         } catch {
             print("启动音频引擎失败: \(error)")
         }
+    }
+
+    private func applyPlaybackRate() {
+        timePitchNode.pitch = 0
+        timePitchNode.rate = playbackRate
+        timePitchNode.bypass = abs(playbackRate - 1.0) < 0.001
     }
 
     private func applyEqualizerSettings() {
@@ -1014,6 +1285,16 @@ final class PlayerViewModel: NSObject, ObservableObject {
 
         let index = lyrics.timedLines.lastIndex { $0.time <= currentTime } ?? 0
         currentLyricIndex = index
+    }
+
+    private func estimateBitRate(for url: URL, duration: TimeInterval) -> Double? {
+        guard duration > 0,
+              let fileSize = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              fileSize > 0 else {
+            return nil
+        }
+
+        return (Double(fileSize) * 8) / duration / 1_000
     }
 
     private func scanDirectory(_ directory: URL) -> [AudioTrack] {
@@ -1137,6 +1418,14 @@ final class PlayerViewModel: NSObject, ObservableObject {
             }
             .store(in: &cancellables)
 
+        $playbackRate
+            .dropFirst()
+            .debounce(for: .milliseconds(150), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.persistAppState()
+            }
+            .store(in: &cancellables)
+
         Publishers.CombineLatest4($isDesktopLyricsLocked, $desktopLyricsDisplayMode, $desktopLyricsBackgroundStyle, $isEqualizerEnabled)
             .dropFirst()
             .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
@@ -1145,10 +1434,18 @@ final class PlayerViewModel: NSObject, ObservableObject {
             }
             .store(in: &cancellables)
 
-        Publishers.CombineLatest3($isEqualizerExpanded, $selectedEqualizerPreset, $equalizerBands)
+        Publishers.CombineLatest4($isEqualizerExpanded, $selectedEqualizerPreset, $equalizerBands, $selectedUserEqualizerPresetID)
             .dropFirst()
             .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
-            .sink { [weak self] _, _, _ in
+            .sink { [weak self] _, _, _, _ in
+                self?.persistAppState()
+            }
+            .store(in: &cancellables)
+
+        $userEqualizerPresets
+            .dropFirst()
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
                 self?.persistAppState()
             }
             .store(in: &cancellables)
@@ -1190,6 +1487,10 @@ final class PlayerViewModel: NSObject, ObservableObject {
             return
         }
 
+        applyPersistedAppState(persisted)
+    }
+
+    private func applyPersistedAppState(_ persisted: PersistedAppState) {
         isRestoringState = true
         defer { isRestoringState = false }
 
@@ -1206,8 +1507,14 @@ final class PlayerViewModel: NSObject, ObservableObject {
 
         appLanguage = AppLanguage(rawValue: persisted.appLanguage ?? AppLanguage.chinese.rawValue) ?? .chinese
         playbackMode = PlaybackMode(rawValue: persisted.playbackMode) ?? .sequential
+        if let persistedLastMode = persisted.lastStandardInterfaceMode,
+           let resolvedMode = InterfaceMode(rawValue: persistedLastMode),
+           resolvedMode != .immersive {
+            lastStandardInterfaceMode = resolvedMode
+        }
         interfaceMode = InterfaceMode(rawValue: persisted.interfaceMode) ?? .compact
         volume = persisted.volume
+        setPlaybackRate(persisted.playbackRate ?? 1.0)
         isDesktopLyricsVisible = persisted.isDesktopLyricsVisible
         desktopLyricsFontSize = persisted.desktopLyricsFontSize
         desktopLyricsOpacity = persisted.desktopLyricsOpacity
@@ -1217,6 +1524,13 @@ final class PlayerViewModel: NSObject, ObservableObject {
         isEqualizerEnabled = persisted.isEqualizerEnabled
         isEqualizerExpanded = persisted.isEqualizerExpanded
         selectedEqualizerPreset = EqualizerPreset(persistedValue: persisted.selectedEqualizerPreset)
+        userEqualizerPresets = persisted.userEqualizerPresets ?? []
+        if let selectedPresetID = persisted.selectedUserEqualizerPresetID,
+           userEqualizerPresets.contains(where: { $0.id == selectedPresetID }) {
+            selectedUserEqualizerPresetID = selectedPresetID
+        } else {
+            selectedUserEqualizerPresetID = nil
+        }
         appTheme = AppTheme(rawValue: persisted.appTheme) ?? .system
         if persisted.equalizerGains.count == equalizerBands.count {
             equalizerBands = zip(equalizerBands, persisted.equalizerGains).map { band, gain in
@@ -1233,6 +1547,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
             QueuedTrack(playlistID: $0.playlistID, trackPath: normalizedPath(forPath: $0.trackPath))
         }
         queuedTrackPaths = playbackQueue.map(\.trackPath)
+        preloadSecurityScopedAccessForAllTracks(promptIfNeeded: false)
 
         restorePlaybackState(persisted.playbackState)
     }
@@ -1259,7 +1574,13 @@ final class PlayerViewModel: NSObject, ObservableObject {
     }
 
     private func persistAppState(capturingPlaybackPosition: Bool = false) {
-        guard !isRestoringState else { return }
+        guard let state = makePersistedAppState(capturingPlaybackPosition: capturingPlaybackPosition),
+              let data = try? JSONEncoder().encode(state) else { return }
+        UserDefaults.standard.set(data, forKey: Self.appStateDefaultsKey)
+    }
+
+    private func makePersistedAppState(capturingPlaybackPosition: Bool) -> PersistedAppState? {
+        guard !isRestoringState else { return nil }
 
         if capturingPlaybackPosition, currentAudioFile != nil {
             if isPlaying {
@@ -1269,23 +1590,27 @@ final class PlayerViewModel: NSObject, ObservableObject {
             }
         }
 
-        guard let selectedPlaylistID = playlists.first(where: { $0.id == self.selectedPlaylistID })?.id ?? playlists.first?.id else { return }
+        guard let resolvedSelectedPlaylistID = playlists.first(where: { $0.id == selectedPlaylistID })?.id ?? playlists.first?.id else {
+            return nil
+        }
 
         let playbackState = PersistedPlaybackState(
-            selectedPlaylistID: self.selectedPlaylistID,
+            selectedPlaylistID: selectedPlaylistID,
             currentPlayingPlaylistID: currentPlayingPlaylistID,
             currentTrackPath: currentTrack?.url.path,
             currentTime: currentTime,
             wasPlaying: isPlaying
         )
 
-        let state = PersistedAppState(
+        return PersistedAppState(
             playlists: playlists.map(PersistedPlaylistCollection.init),
-            selectedPlaylistID: selectedPlaylistID,
+            selectedPlaylistID: resolvedSelectedPlaylistID,
             appLanguage: appLanguage.rawValue,
             playbackMode: playbackMode.rawValue,
             interfaceMode: interfaceMode.rawValue,
+            lastStandardInterfaceMode: lastStandardInterfaceMode.rawValue,
             volume: volume,
+            playbackRate: playbackRate,
             isDesktopLyricsVisible: isDesktopLyricsVisible,
             desktopLyricsFontSize: desktopLyricsFontSize,
             desktopLyricsOpacity: desktopLyricsOpacity,
@@ -1301,11 +1626,38 @@ final class PlayerViewModel: NSObject, ObservableObject {
             queuedTracks: playbackQueue.map {
                 PersistedQueuedTrack(playlistID: $0.playlistID, trackPath: $0.trackPath)
             },
+            userEqualizerPresets: userEqualizerPresets,
+            selectedUserEqualizerPresetID: selectedUserEqualizerPresetID,
             playbackState: playbackState
         )
+    }
 
-        guard let data = try? JSONEncoder().encode(state) else { return }
-        UserDefaults.standard.set(data, forKey: Self.appStateDefaultsKey)
+    private func makeExportedUserDataPackage() -> ExportedUserDataPackage? {
+        guard let appState = makePersistedAppState(capturingPlaybackPosition: true) else { return nil }
+        return ExportedUserDataPackage(
+            version: 1,
+            exportedAt: Date(),
+            appState: appState,
+            listeningHistory: listeningHistory,
+            securityScopedBookmarks: serializedSecurityScopedBookmarks(),
+            backgroundAsset: exportedBackgroundAsset()
+        )
+    }
+
+    private func serializedSecurityScopedBookmarks() -> [PersistedSecurityScopedBookmark] {
+        securityScopedBookmarks.map {
+            PersistedSecurityScopedBookmark(path: $0.key, data: $0.value)
+        }
+        .sorted { $0.path < $1.path }
+    }
+
+    private func exportedBackgroundAsset() -> ExportedBackgroundAsset? {
+        guard appTheme == .customImage, let customBackgroundImagePath else { return nil }
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: customBackgroundImagePath)) else { return nil }
+        return ExportedBackgroundAsset(
+            originalFileName: URL(fileURLWithPath: customBackgroundImagePath).lastPathComponent,
+            data: data
+        )
     }
 
     private func restoreSecurityScopedBookmarks() {
@@ -1385,14 +1737,130 @@ final class PlayerViewModel: NSObject, ObservableObject {
         }
     }
 
-    private func saveSecurityScopedBookmarks() {
-        let payload = securityScopedBookmarks.map {
-            PersistedSecurityScopedBookmark(path: $0.key, data: $0.value)
+    private func preloadSecurityScopedAccessForAllTracks(promptIfNeeded: Bool) {
+        let allTrackURLs = Array(Set(playlists.flatMap(\.tracks).map { normalizedPath(for: $0.url) }))
+            .map { URL(fileURLWithPath: $0) }
+
+        guard !allTrackURLs.isEmpty else { return }
+
+        persistSecurityScopedAccess(for: allTrackURLs)
+
+        let unresolved = allTrackURLs.filter { !hasPersistedSecurityScopedAccess(for: $0) }
+        guard promptIfNeeded, !unresolved.isEmpty else { return }
+        requestSecurityScopedAccessForTracks(unresolved)
+    }
+
+    private func hasPersistedSecurityScopedAccess(for url: URL) -> Bool {
+        let normalizedTrackPath = normalizedPath(for: url)
+
+        if activeSecurityScopedURLs[normalizedTrackPath] != nil || securityScopedBookmarks[normalizedTrackPath] != nil {
+            return true
         }
-        .sorted { $0.path < $1.path }
+
+        return securityScopedBookmarks.keys.contains { bookmarkedPath in
+            path(bookmarkedPath, containsDescendantPath: normalizedTrackPath)
+        } || activeSecurityScopedURLs.keys.contains { activePath in
+            path(activePath, containsDescendantPath: normalizedTrackPath)
+        }
+    }
+
+    private func path(_ parentPath: String, containsDescendantPath childPath: String) -> Bool {
+        let parentURL = URL(fileURLWithPath: parentPath).standardizedFileURL
+        let childURL = URL(fileURLWithPath: childPath).standardizedFileURL
+        let parentComponents = parentURL.pathComponents
+        let childComponents = childURL.pathComponents
+
+        guard parentComponents.count < childComponents.count else { return false }
+        return Array(childComponents.prefix(parentComponents.count)) == parentComponents
+    }
+
+    private func requestSecurityScopedAccessForTracks(_ missingTracks: [URL]) {
+        let panel = NSOpenPanel()
+        panel.message = appLanguage.pick(
+            "为避免切歌时重复申请权限，请一次性选择当前歌单对应的音频文件或它们所在文件夹。",
+            "To avoid repeated permission prompts while switching tracks, select the current playlist files or their parent folders once."
+        )
+        panel.prompt = appLanguage.pick("授权", "Grant Access")
+        panel.allowedContentTypes = [
+            .folder,
+            UTType(filenameExtension: "flac"),
+            UTType(filenameExtension: "wav"),
+            UTType.mp3,
+            UTType(filenameExtension: "dsf"),
+            UTType(filenameExtension: "dff"),
+            UTType(filenameExtension: "dsd")
+        ].compactMap { $0 }
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK else { return }
+
+        persistSecurityScopedAccess(for: panel.urls)
+        persistSecurityScopedAccess(for: missingTracks.filter { trackURL in
+            panel.urls.contains { selectedURL in
+                let standardizedSelected = selectedURL.standardizedFileURL
+                let standardizedTrack = trackURL.standardizedFileURL
+                return standardizedSelected == standardizedTrack ||
+                    path(standardizedSelected.path, containsDescendantPath: standardizedTrack.path)
+            }
+        })
+    }
+
+    private func saveSecurityScopedBookmarks() {
+        let payload = serializedSecurityScopedBookmarks()
 
         guard let data = try? JSONEncoder().encode(payload) else { return }
         UserDefaults.standard.set(data, forKey: Self.securityScopedBookmarksDefaultsKey)
+    }
+
+    private func applyImportedUserData(_ package: ExportedUserDataPackage) throws {
+        activeSecurityScopedURLs.values.forEach { $0.stopAccessingSecurityScopedResource() }
+        activeSecurityScopedURLs.removeAll()
+
+        stopPlayback(clearSelection: true)
+        listeningHistory = package.listeningHistory
+        persistListeningHistory()
+
+        securityScopedBookmarks = Dictionary(uniqueKeysWithValues: package.securityScopedBookmarks.map { ($0.path, $0.data) })
+        saveSecurityScopedBookmarks()
+        restoreSecurityScopedBookmarks()
+
+        applyPersistedAppState(package.appState)
+        preloadSecurityScopedAccessForAllTracks(promptIfNeeded: true)
+
+        if let backgroundAsset = package.backgroundAsset,
+           let storedPath = try? storeImportedBackgroundAsset(backgroundAsset) {
+            loadCustomBackgroundImage(fromPath: storedPath)
+            appTheme = .customImage
+        }
+
+        persistAppState(capturingPlaybackPosition: false)
+    }
+
+    private func confirmPersonalDataImport() -> Bool {
+        let alert = NSAlert()
+        alert.messageText = appLanguage.pick("导入将覆盖当前数据", "Import Will Replace Current Data")
+        alert.informativeText = appLanguage.pick(
+            "当前歌单、听歌历史、均衡器预设、主题与桌面歌词设置会被导入内容替换。",
+            "Your playlists, listening history, equalizer presets, themes, and desktop lyrics settings will be replaced by the imported data."
+        )
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: appLanguage.pick("继续导入", "Continue"))
+        alert.addButton(withTitle: appLanguage.pick("取消", "Cancel"))
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func presentModalMessage(title: String, message: String, style: NSAlert.Style) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = style
+        alert.addButton(withTitle: appLanguage.pick("好", "OK"))
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     private func startSupplementalAssetLoad(for track: AudioTrack, duration: TimeInterval) {
@@ -1400,6 +1868,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
         supplementalAssetTask = Task { [weak self] in
             guard let self else { return }
 
+            var resolvedArtwork: NSImage?
             let embeddedAssets = await AudioAssetLoader.loadLyricsAndArtwork(for: track.url)
             guard !Task.isCancelled, self.currentTrack?.url == track.url else { return }
 
@@ -1415,6 +1884,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
             }
 
             if let artwork = embeddedAssets.artwork {
+                resolvedArtwork = artwork
                 self.currentArtwork = artwork
             }
 
@@ -1439,11 +1909,18 @@ final class PlayerViewModel: NSObject, ObservableObject {
                 album: track.album,
                 duration: self.duration
             )
-            if self.currentArtwork == nil,
+            if resolvedArtwork == nil,
                let fetchedArtwork = await OnlineMetadataService.shared.fetchArtwork(for: track, info: artworkInfo),
                !Task.isCancelled,
                self.currentTrack?.url == track.url {
+                resolvedArtwork = fetchedArtwork
                 self.currentArtwork = fetchedArtwork
+            }
+
+            if !Task.isCancelled,
+               self.currentTrack?.url == track.url,
+               resolvedArtwork == nil {
+                self.currentArtwork = nil
             }
         }
     }
@@ -1499,6 +1976,16 @@ final class PlayerViewModel: NSObject, ObservableObject {
         }
     }
 
+    private static func equalizerBands(forGains gains: [Float]) -> [EqualizerBandSetting] {
+        makeDefaultEqualizerBands().enumerated().map { index, band in
+            var updated = band
+            if gains.indices.contains(index) {
+                updated.gain = gains[index]
+            }
+            return updated
+        }
+    }
+
     private static func equalizerBands(for preset: EqualizerPreset) -> [EqualizerBandSetting] {
         let gains: [Float]
 
@@ -1515,13 +2002,17 @@ final class PlayerViewModel: NSObject, ObservableObject {
             gains = [3, 2, 1, 0, -1, 1, 3, 4, 4, 3]
         case .classical:
             gains = [0, 0, -1, -2, 0, 2, 3, 3, 2, 1]
+        case .musicHall:
+            gains = [2, 2, 1, 0, 0, 1, 2, 3, 3, 2]
+        case .studio:
+            gains = [0, 0, 1, 1, 0, 0, 1, 1, 0, -1]
+        case .ktv:
+            gains = [4, 3, 1, -1, 0, 2, 4, 5, 3, 1]
+        case .concert:
+            gains = [5, 4, 2, 0, -1, 1, 3, 4, 5, 4]
         }
 
-        return makeDefaultEqualizerBands().enumerated().map { index, band in
-            var updated = band
-            updated.gain = gains[index]
-            return updated
-        }
+        return equalizerBands(forGains: gains)
     }
 
     private var selectedPlaylistIndex: Int? {
@@ -1602,12 +2093,63 @@ final class PlayerViewModel: NSObject, ObservableObject {
         customBackgroundImagePath = path
     }
 
+    private func uniqueUserEqualizerPresetName(for baseName: String) -> String {
+        guard userEqualizerPresets.contains(where: { $0.name == baseName }) else { return baseName }
+        var counter = 2
+        while userEqualizerPresets.contains(where: { $0.name == "\(baseName) \(counter)" }) {
+            counter += 1
+        }
+        return "\(baseName) \(counter)"
+    }
+
+    private static func nearestSupportedPlaybackRate(to rate: Float) -> Float {
+        supportedPlaybackRates.min(by: { abs($0 - rate) < abs($1 - rate) }) ?? 1.0
+    }
+
+    private static func formattedPlaybackRate(_ rate: Float) -> String {
+        let resolvedRate = nearestSupportedPlaybackRate(to: rate)
+        if resolvedRate.rounded() == resolvedRate {
+            return String(format: "%.1fx", resolvedRate)
+        }
+        if (resolvedRate * 10).rounded() == resolvedRate * 10 {
+            return String(format: "%.1fx", resolvedRate)
+        }
+        return String(format: "%.2fx", resolvedRate)
+    }
+
+    private func storeImportedBackgroundAsset(_ asset: ExportedBackgroundAsset) throws -> String {
+        let baseDirectory = try Self.migrationSupportDirectory()
+        let destination = baseDirectory.appendingPathComponent(asset.originalFileName)
+        try asset.data.write(to: destination, options: .atomic)
+        return destination.path
+    }
+
     private static let monthFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = "yyyy年M月"
         return formatter
     }()
+
+    private static let exportDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter
+    }()
+
+    private static func migrationSupportDirectory() throws -> URL {
+        let fileManager = FileManager.default
+        let baseURL = try fileManager.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let directory = baseURL.appendingPathComponent("ZephyrPlayerMigration", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
 
     private static let localizedDefaultPlaylistNames: Set<String> = [
         defaultPlaylistName,

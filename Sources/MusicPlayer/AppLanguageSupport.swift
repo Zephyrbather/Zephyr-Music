@@ -91,6 +91,8 @@ extension PlayerViewModel.InterfaceMode {
             return language.pick("完整模式", "Full Mode")
         case .compact:
             return language.pick("简洁模式", "Compact Mode")
+        case .immersive:
+            return language.pick("沉浸式模式", "Immersive Mode")
         }
     }
 }
@@ -110,6 +112,14 @@ extension PlayerViewModel.EqualizerPreset {
             return language.pick("摇滚", "Rock")
         case .classical:
             return language.pick("古典", "Classical")
+        case .musicHall:
+            return language.pick("音乐厅", "Music Hall")
+        case .studio:
+            return language.pick("录音棚", "Studio")
+        case .ktv:
+            return language.pick("KTV", "KTV")
+        case .concert:
+            return language.pick("演唱会", "Concert")
         }
     }
 }
