@@ -8,6 +8,11 @@ Zephyr Player 是一个面向 macOS 的原生本地音乐播放器，基于 `Swi
 
 ![完整模式](XcodeApp/Assets.xcassets/AppIcon.appiconset/whole.png)
 
+沉浸模式
+
+![沉浸模式](XcodeApp/Assets.xcassets/AppIcon.appiconset/deep.png)
+
+
 简洁模式
 
 <p align="left">
