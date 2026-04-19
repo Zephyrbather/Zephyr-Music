@@ -36,6 +36,9 @@ struct MusicPlayerApp: App {
                 .onChange(of: viewModel.isDesktopLyricsVisible) { isVisible in
                     desktopLyricsController?.setVisible(isVisible)
                 }
+                .onChange(of: viewModel.isDesktopLyricsSettingsPresented) { _ in
+                    desktopLyricsController?.refreshLayout()
+                }
                 .onChange(of: viewModel.desktopLyricsOpacity) { _ in
                     desktopLyricsController?.applySettings()
                 }
@@ -56,6 +59,9 @@ struct MusicPlayerApp: App {
                 }
                 .onChange(of: viewModel.currentTrack?.id) { _ in
                     desktopLyricsController?.refreshLayout(reposition: viewModel.isDesktopLyricsVisible)
+                }
+                .onChange(of: viewModel.appLanguage) { _ in
+                    desktopLyricsController?.refreshLayout()
                 }
         }
         .windowResizability(.contentMinSize)

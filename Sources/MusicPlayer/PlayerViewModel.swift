@@ -206,6 +206,9 @@ final class PlayerViewModel: NSObject, ObservableObject {
 
     enum DesktopLyricsBackgroundStyle: String, CaseIterable, Identifiable {
         case themed = "主题色背景"
+        case graphite = "石墨灰背景"
+        case ocean = "海盐蓝背景"
+        case rose = "晚霞粉背景"
         case transparent = "纯透明背景"
 
         var id: String { rawValue }
@@ -326,6 +329,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
     @Published private(set) var batchScrapeTargetCount = 0
     @Published var isDropTargeted = false
     @Published var isDesktopLyricsVisible = false
+    @Published var isDesktopLyricsSettingsPresented = false
     @Published var desktopLyricsFontSize: Double = 28
     @Published var desktopLyricsOpacity: Double = 0.9
     @Published var isDesktopLyricsLocked = false

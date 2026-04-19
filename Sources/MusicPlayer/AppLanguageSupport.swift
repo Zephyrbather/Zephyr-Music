@@ -65,6 +65,12 @@ extension PlayerViewModel.DesktopLyricsBackgroundStyle {
         switch self {
         case .themed:
             return language.pick("主题色背景", "Theme Background")
+        case .graphite:
+            return language.pick("石墨灰背景", "Graphite Background")
+        case .ocean:
+            return language.pick("海盐蓝背景", "Ocean Blue Background")
+        case .rose:
+            return language.pick("晚霞粉背景", "Rose Background")
         case .transparent:
             return language.pick("纯透明背景", "Transparent Background")
         }
