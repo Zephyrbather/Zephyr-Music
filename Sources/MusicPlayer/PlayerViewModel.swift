@@ -1,6 +1,6 @@
 import AppKit
-import AVFoundation
-import Combine
+@preconcurrency import AVFoundation
+@preconcurrency import Combine
 import Foundation
 import UniformTypeIdentifiers
 
@@ -305,8 +305,25 @@ final class PlayerViewModel: NSObject, ObservableObject {
     @Published private(set) var duration: TimeInterval = 0
     @Published private(set) var currentTime: TimeInterval = 0
     @Published private(set) var lyrics = LyricsDocument(timedLines: [], plainText: nil)
+    @Published private(set) var availableLyricsSources: [LyricsSourceOption] = []
+    @Published private(set) var selectedLyricsSourceID: String?
+    @Published private(set) var previewLyricsSource: LyricsSourceOption?
+    @Published private(set) var onlineLyricsSearchResults: [LyricsSourceOption] = []
+    @Published private(set) var isSearchingLyricsOnline = false
+    @Published private(set) var didAttemptOnlineLyricsSearch = false
+    @Published private(set) var onlineLyricsResultCount = 0
     @Published private(set) var currentLyricIndex: Int?
     @Published private(set) var currentArtwork: NSImage?
+    @Published private(set) var availableArtworkSources: [ArtworkOption] = []
+    @Published private(set) var selectedArtworkSourceID: String?
+    @Published private(set) var previewArtworkSource: ArtworkOption?
+    @Published private(set) var onlineArtworkSearchResults: [ArtworkOption] = []
+    @Published private(set) var isSearchingArtworkOnline = false
+    @Published private(set) var didAttemptOnlineArtworkSearch = false
+    @Published private(set) var onlineArtworkResultCount = 0
+    @Published private(set) var isBatchScrapingMissingMetadata = false
+    @Published private(set) var batchScrapeCompletedCount = 0
+    @Published private(set) var batchScrapeTargetCount = 0
     @Published var isDropTargeted = false
     @Published var isDesktopLyricsVisible = false
     @Published var desktopLyricsFontSize: Double = 28
@@ -673,6 +690,274 @@ final class PlayerViewModel: NSObject, ObservableObject {
         return lyrics.timedLines[nextIndex].text
     }
 
+    var onlineLyricsSourcesCount: Int {
+        onlineLyricsSearchResults.count
+    }
+
+    var isSearchingOnlineMetadata: Bool {
+        isSearchingLyricsOnline || isSearchingArtworkOnline
+    }
+
+    var hasOnlineMetadataResults: Bool {
+        !onlineLyricsSearchResults.isEmpty || !onlineArtworkSearchResults.isEmpty
+    }
+
+    var hasOnlineMetadataPreview: Bool {
+        hasLyricsPreview || hasArtworkPreview
+    }
+
+    var batchScrapeProgressText: String {
+        guard batchScrapeTargetCount > 0 else {
+            return appLanguage.pick("刮削中…", "Scraping...")
+        }
+        return appLanguage.pick(
+            "刮削中 \(batchScrapeCompletedCount)/\(batchScrapeTargetCount)",
+            "Scraping \(batchScrapeCompletedCount)/\(batchScrapeTargetCount)"
+        )
+    }
+
+    var selectedLyricsSource: LyricsSourceOption? {
+        guard let selectedLyricsSourceID else { return nil }
+        return availableLyricsSources.first(where: { $0.id == selectedLyricsSourceID })
+    }
+
+    var displayedLyricsSource: LyricsSourceOption? {
+        previewLyricsSource ?? selectedLyricsSource
+    }
+
+    var hasLyricsPreview: Bool {
+        previewLyricsSource != nil
+    }
+
+    func selectLyricsSource(_ sourceID: String) {
+        guard availableLyricsSources.contains(where: { $0.id == sourceID }) else { return }
+        selectedLyricsSourceID = sourceID
+        previewLyricsSource = nil
+        syncDisplayedLyrics()
+        onlineLyricsResultCount = onlineLyricsSearchResults.count
+    }
+
+    func previewLyricsSearchResult(_ sourceID: String) {
+        guard let source = onlineLyricsSearchResults.first(where: { $0.id == sourceID }) else { return }
+        previewLyricsSource = source
+        syncDisplayedLyrics()
+    }
+
+    func applyPreviewLyricsSource() {
+        guard let previewLyricsSource else { return }
+
+        if !availableLyricsSources.contains(where: { $0.id == previewLyricsSource.id }) {
+            availableLyricsSources.append(previewLyricsSource)
+        }
+
+        selectedLyricsSourceID = previewLyricsSource.id
+        self.previewLyricsSource = nil
+        syncDisplayedLyrics()
+    }
+
+    func restoreLyricsSourceSelection() {
+        previewLyricsSource = nil
+        syncDisplayedLyrics()
+    }
+
+    func searchLyricsOnlineForCurrentTrack(forceRefresh: Bool = true) {
+        guard let track = currentTrack else { return }
+
+        let info = TrackSearchInfo(
+            title: track.title,
+            artist: track.artist,
+            album: track.album,
+            duration: duration
+        )
+
+        previewLyricsSource = nil
+        syncDisplayedLyrics()
+        onlineLyricsSearchResults = []
+        isSearchingLyricsOnline = true
+        didAttemptOnlineLyricsSearch = true
+        onlineLyricsResultCount = 0
+        let trackPath = track.url.standardizedFileURL.path
+
+        Task { [weak self] in
+            guard let self else { return }
+
+            let fetchedSources = await OnlineMetadataService.shared.fetchLyricsSources(
+                for: track,
+                info: info,
+                forceRefresh: forceRefresh
+            )
+
+            await MainActor.run {
+                self.isSearchingLyricsOnline = false
+
+                guard let currentTrack = self.currentTrack,
+                      currentTrack.url.standardizedFileURL.path == trackPath else {
+                    return
+                }
+
+                self.onlineLyricsSearchResults = fetchedSources
+                self.onlineLyricsResultCount = fetchedSources.count
+            }
+        }
+    }
+
+    var onlineArtworkSourcesCount: Int {
+        onlineArtworkSearchResults.count
+    }
+
+    var selectedArtworkSource: ArtworkOption? {
+        guard let selectedArtworkSourceID else { return nil }
+        return availableArtworkSources.first(where: { $0.id == selectedArtworkSourceID })
+    }
+
+    var displayedArtworkSource: ArtworkOption? {
+        previewArtworkSource ?? selectedArtworkSource
+    }
+
+    var hasArtworkPreview: Bool {
+        previewArtworkSource != nil
+    }
+
+    func selectArtworkSource(_ sourceID: String) {
+        guard availableArtworkSources.contains(where: { $0.id == sourceID }) else { return }
+        selectedArtworkSourceID = sourceID
+        previewArtworkSource = nil
+        syncDisplayedArtwork()
+        onlineArtworkResultCount = onlineArtworkSearchResults.count
+    }
+
+    func previewArtworkSearchResult(_ sourceID: String) {
+        guard let source = onlineArtworkSearchResults.first(where: { $0.id == sourceID }) else { return }
+        previewArtworkSource = source
+        syncDisplayedArtwork()
+    }
+
+    func applyPreviewArtworkSource() {
+        guard let previewArtworkSource else { return }
+
+        if !availableArtworkSources.contains(where: { $0.id == previewArtworkSource.id }) {
+            availableArtworkSources.append(previewArtworkSource)
+        }
+
+        selectedArtworkSourceID = previewArtworkSource.id
+        self.previewArtworkSource = nil
+        syncDisplayedArtwork()
+    }
+
+    func restoreArtworkSourceSelection() {
+        previewArtworkSource = nil
+        syncDisplayedArtwork()
+    }
+
+    func searchArtworkOnlineForCurrentTrack(forceRefresh: Bool = true) {
+        guard let track = currentTrack else { return }
+
+        let info = TrackSearchInfo(
+            title: track.title,
+            artist: track.artist,
+            album: track.album,
+            duration: duration
+        )
+
+        previewArtworkSource = nil
+        syncDisplayedArtwork()
+        onlineArtworkSearchResults = []
+        isSearchingArtworkOnline = true
+        didAttemptOnlineArtworkSearch = true
+        onlineArtworkResultCount = 0
+        let trackPath = track.url.standardizedFileURL.path
+
+        Task { [weak self] in
+            guard let self else { return }
+
+            let fetchedSources = await OnlineMetadataService.shared.fetchArtworkOptions(
+                for: track,
+                info: info,
+                forceRefresh: forceRefresh
+            )
+
+            await MainActor.run {
+                self.isSearchingArtworkOnline = false
+
+                guard let currentTrack = self.currentTrack,
+                      currentTrack.url.standardizedFileURL.path == trackPath else {
+                    return
+                }
+
+                self.onlineArtworkSearchResults = fetchedSources
+                self.onlineArtworkResultCount = fetchedSources.count
+            }
+        }
+    }
+
+    func searchOnlineMetadataForCurrentTrack(forceRefresh: Bool = true) {
+        guard currentTrack != nil else { return }
+        searchLyricsOnlineForCurrentTrack(forceRefresh: forceRefresh)
+        searchArtworkOnlineForCurrentTrack(forceRefresh: forceRefresh)
+    }
+
+    func scrapeMissingMetadataInSelectedPlaylist() {
+        guard !isBatchScrapingMissingMetadata else { return }
+
+        let tracks = currentPlaylist.tracks
+        guard !tracks.isEmpty else {
+            presentModalMessage(
+                title: appLanguage.pick("当前歌单为空", "Playlist Is Empty"),
+                message: appLanguage.pick("先添加歌曲，再执行一键刮削。", "Add tracks before running auto scrape."),
+                style: .informational
+            )
+            return
+        }
+
+        isBatchScrapingMissingMetadata = true
+        batchScrapeCompletedCount = 0
+        batchScrapeTargetCount = tracks.count
+
+        Task { [weak self] in
+            guard let self else { return }
+
+            var lyricsSavedCount = 0
+            var artworkSavedCount = 0
+            var unresolvedCount = 0
+            var failureCount = 0
+            var touchedCurrentTrack = false
+
+            for (offset, track) in tracks.enumerated() {
+                let result = await self.scrapeMissingMetadata(for: track)
+                batchScrapeCompletedCount = offset + 1
+
+                if result.lyricsSaved {
+                    lyricsSavedCount += 1
+                }
+                if result.artworkSaved {
+                    artworkSavedCount += 1
+                }
+                if result.hadFailure {
+                    failureCount += 1
+                }
+                if result.wasUnresolved {
+                    unresolvedCount += 1
+                }
+                if currentTrack?.url.standardizedFileURL == track.url.standardizedFileURL,
+                   result.lyricsSaved || result.artworkSaved {
+                    touchedCurrentTrack = true
+                }
+            }
+
+            if touchedCurrentTrack, let currentTrack {
+                startSupplementalAssetLoad(for: currentTrack, duration: duration)
+            }
+
+            isBatchScrapingMissingMetadata = false
+            let title = appLanguage.pick("刮削完成", "Scrape Complete")
+            let message = appLanguage.pick(
+                "已补全歌词 \(lyricsSavedCount) 首，封面 \(artworkSavedCount) 首；未命中 \(unresolvedCount) 首，写入失败 \(failureCount) 首。",
+                "Filled lyrics for \(lyricsSavedCount) tracks and artwork for \(artworkSavedCount) tracks; \(unresolvedCount) unresolved, \(failureCount) failed to save."
+            )
+            presentModalMessage(title: title, message: message, style: .informational)
+        }
+    }
+
     func updateEqualizerBandGain(at index: Int, gain: Float) {
         guard equalizerBands.indices.contains(index) else { return }
         if selectedUserEqualizerPresetID != nil {
@@ -829,14 +1114,17 @@ final class PlayerViewModel: NSObject, ObservableObject {
         }
     }
 
-    func createPlaylist() {
+    @discardableResult
+    func createPlaylist() -> PlaylistCollection {
         let name = nextPlaylistName()
         let playlist = PlaylistCollection(name: name)
         playlists.append(playlist)
         selectedPlaylistID = playlist.id
+        return playlist
     }
 
-    func createPlaylist(named proposedName: String) {
+    @discardableResult
+    func createPlaylist(named proposedName: String) -> PlaylistCollection {
         let trimmed = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
         let fallbackName = nextPlaylistName()
         let baseName = trimmed.isEmpty ? fallbackName : trimmed
@@ -844,6 +1132,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
         let playlist = PlaylistCollection(name: resolvedName)
         playlists.append(playlist)
         selectedPlaylistID = playlist.id
+        return playlist
     }
 
     func selectPlaylist(_ id: UUID) {
@@ -1033,6 +1322,23 @@ final class PlayerViewModel: NSObject, ObservableObject {
         queuedTrackPaths = playbackQueue.map(\.trackPath)
     }
 
+    func addTrack(_ track: AudioTrack, to destinationPlaylistID: UUID? = nil) {
+        let targetPlaylistID = destinationPlaylistID ?? selectedPlaylistID
+        guard let destinationIndex = playlists.firstIndex(where: { $0.id == targetPlaylistID }) else { return }
+
+        let normalized = normalizedPath(for: track.url)
+        guard !playlists[destinationIndex].tracks.contains(where: {
+            normalizedPath(for: $0.url) == normalized
+        }) else {
+            return
+        }
+
+        let startIndex = playlists[destinationIndex].tracks.count
+        playlists[destinationIndex].tracks.append(track)
+        persistSecurityScopedAccess(for: [track.url])
+        enrichMetadataForNewTracks(startingAt: startIndex, in: targetPlaylistID)
+    }
+
     private func appendTracks(_ tracks: [AudioTrack]) {
         guard !tracks.isEmpty else { return }
         guard let selectedPlaylistIndex else { return }
@@ -1075,8 +1381,23 @@ final class PlayerViewModel: NSObject, ObservableObject {
             currentPlayingPlaylistID = playlistID
             currentIndex = index
             isPlaying = false
+            availableLyricsSources = []
+            selectedLyricsSourceID = nil
+            previewLyricsSource = nil
+            onlineLyricsSearchResults = []
+            isSearchingLyricsOnline = false
+            didAttemptOnlineLyricsSearch = false
+            onlineLyricsResultCount = 0
             lyrics = LyricsDocument(timedLines: [], plainText: nil)
             currentLyricIndex = nil
+            availableArtworkSources = []
+            selectedArtworkSourceID = nil
+            previewArtworkSource = nil
+            onlineArtworkSearchResults = []
+            isSearchingArtworkOnline = false
+            didAttemptOnlineArtworkSearch = false
+            onlineArtworkResultCount = 0
+            currentArtwork = nil
             let clampedTime = min(max(startTime, 0), duration)
             let startFrame = AVAudioFramePosition(clampedTime * currentSampleRate)
             currentFramePosition = min(max(startFrame, 0), audioFile.length)
@@ -1117,8 +1438,22 @@ final class PlayerViewModel: NSObject, ObservableObject {
         currentChannelCountValue = 0
         currentFramePosition = 0
         currentStartFrame = 0
+        availableLyricsSources = []
+        selectedLyricsSourceID = nil
+        previewLyricsSource = nil
+        onlineLyricsSearchResults = []
+        isSearchingLyricsOnline = false
+        didAttemptOnlineLyricsSearch = false
+        onlineLyricsResultCount = 0
         lyrics = LyricsDocument(timedLines: [], plainText: nil)
         currentLyricIndex = nil
+        availableArtworkSources = []
+        selectedArtworkSourceID = nil
+        previewArtworkSource = nil
+        onlineArtworkSearchResults = []
+        isSearchingArtworkOnline = false
+        didAttemptOnlineArtworkSearch = false
+        onlineArtworkResultCount = 0
         currentArtwork = nil
         supplementalAssetTask?.cancel()
         supplementalAssetTask = nil
@@ -1285,6 +1620,114 @@ final class PlayerViewModel: NSObject, ObservableObject {
 
         let index = lyrics.timedLines.lastIndex { $0.time <= currentTime } ?? 0
         currentLyricIndex = index
+    }
+
+    private func deduplicatedLyricsSources(_ sources: [LyricsSourceOption]) -> [LyricsSourceOption] {
+        var result: [LyricsSourceOption] = []
+
+        for source in sources where !source.document.isEmpty {
+            guard !result.contains(where: { $0.id == source.id || $0.document == source.document }) else { continue }
+            result.append(source)
+        }
+
+        return result
+    }
+
+    private func deduplicatedArtworkSources(_ sources: [ArtworkOption]) -> [ArtworkOption] {
+        var result: [ArtworkOption] = []
+
+        for source in sources {
+            guard !result.contains(where: { $0.id == source.id }) else { continue }
+            result.append(source)
+        }
+
+        return result
+    }
+
+    private func applyLyricsSources(
+        _ sources: [LyricsSourceOption],
+        preferredSelection preferredSourceID: String? = nil,
+        preserveSelection: Bool = true
+    ) {
+        let uniqueSources = deduplicatedLyricsSources(sources)
+        availableLyricsSources = uniqueSources
+
+        let fallbackID = preserveSelection ? selectedLyricsSourceID : nil
+        let selectedID = preferredSourceID ?? fallbackID ?? uniqueSources.first?.id
+
+        if let selectedID,
+           uniqueSources.contains(where: { $0.id == selectedID }) {
+            selectedLyricsSourceID = selectedID
+        } else {
+            selectedLyricsSourceID = nil
+        }
+
+        syncDisplayedLyrics()
+    }
+
+    private func mergeLyricsSources(
+        _ sources: [LyricsSourceOption],
+        preferredSelection preferredSourceID: String? = nil
+    ) {
+        applyLyricsSources(
+            availableLyricsSources + sources,
+            preferredSelection: preferredSourceID,
+            preserveSelection: true
+        )
+    }
+
+    private func applyArtworkSources(
+        _ sources: [ArtworkOption],
+        preferredSelection preferredSourceID: String? = nil,
+        preserveSelection: Bool = true
+    ) {
+        let uniqueSources = deduplicatedArtworkSources(sources)
+        availableArtworkSources = uniqueSources
+
+        let fallbackID = preserveSelection ? selectedArtworkSourceID : nil
+        let selectedID = preferredSourceID ?? fallbackID ?? uniqueSources.first?.id
+
+        if let selectedID,
+           uniqueSources.contains(where: { $0.id == selectedID }) {
+            selectedArtworkSourceID = selectedID
+        } else {
+            selectedArtworkSourceID = nil
+        }
+
+        syncDisplayedArtwork()
+    }
+
+    private func mergeArtworkSources(
+        _ sources: [ArtworkOption],
+        preferredSelection preferredSourceID: String? = nil
+    ) {
+        applyArtworkSources(
+            availableArtworkSources + sources,
+            preferredSelection: preferredSourceID,
+            preserveSelection: true
+        )
+    }
+
+    private func syncDisplayedLyrics() {
+        if let previewLyricsSource {
+            lyrics = previewLyricsSource.document
+        } else if let selectedLyricsSource {
+            lyrics = selectedLyricsSource.document
+        } else {
+            lyrics = LyricsDocument(timedLines: [], plainText: nil)
+        }
+
+        refreshCurrentLyricIndex()
+    }
+
+    private func syncDisplayedArtwork() {
+        if let previewArtworkSource {
+            currentArtwork = previewArtworkSource.image
+        } else if let selectedArtworkSource {
+            currentArtwork = selectedArtworkSource.image
+        } else {
+            currentArtwork = nil
+        }
     }
 
     private func estimateBitRate(for url: URL, duration: TimeInterval) -> Double? {
@@ -1863,29 +2306,188 @@ final class PlayerViewModel: NSObject, ObservableObject {
         alert.runModal()
     }
 
+    private struct BatchScrapeResult {
+        let lyricsSaved: Bool
+        let artworkSaved: Bool
+        let wasUnresolved: Bool
+        let hadFailure: Bool
+    }
+
+    private func scrapeMissingMetadata(for track: AudioTrack) async -> BatchScrapeResult {
+        let embeddedLyrics = await AudioAssetLoader.loadLyricsSources(for: track.url)
+        let sidecarLyrics = LyricsParser.loadLyricsSources(for: track)
+        let localArtwork = await AudioAssetLoader.loadArtworkAsset(for: track.url)
+
+        let needsLyrics = embeddedLyrics.isEmpty && sidecarLyrics.isEmpty
+        let needsArtwork = localArtwork == nil
+
+        guard needsLyrics || needsArtwork else {
+            return BatchScrapeResult(
+                lyricsSaved: false,
+                artworkSaved: false,
+                wasUnresolved: false,
+                hadFailure: false
+            )
+        }
+
+        let info = TrackSearchInfo(
+            title: track.title,
+            artist: track.artist,
+            album: track.album,
+            duration: nil
+        )
+
+        var lyricsSaved = false
+        var artworkSaved = false
+        var hadFailure = false
+        var unresolvedTargets = 0
+
+        if needsLyrics {
+            let fetchedLyrics = await OnlineMetadataService.shared.fetchLyricsSources(
+                for: track,
+                info: info,
+                forceRefresh: true
+            )
+
+            if let firstLyrics = fetchedLyrics.first {
+                do {
+                    try saveLyricsSidecar(firstLyrics, for: track)
+                    lyricsSaved = true
+                } catch {
+                    hadFailure = true
+                }
+            } else {
+                unresolvedTargets += 1
+            }
+        }
+
+        if needsArtwork {
+            let fetchedArtwork = await OnlineMetadataService.shared.fetchArtworkOptions(
+                for: track,
+                info: info,
+                forceRefresh: true
+            )
+
+            if let firstArtwork = fetchedArtwork.first {
+                do {
+                    try saveArtworkSidecar(firstArtwork, for: track)
+                    artworkSaved = true
+                } catch {
+                    hadFailure = true
+                }
+            } else {
+                unresolvedTargets += 1
+            }
+        }
+
+        return BatchScrapeResult(
+            lyricsSaved: lyricsSaved,
+            artworkSaved: artworkSaved,
+            wasUnresolved: unresolvedTargets > 0 && !hadFailure,
+            hadFailure: hadFailure
+        )
+    }
+
+    private func saveLyricsSidecar(_ source: LyricsSourceOption, for track: AudioTrack) throws {
+        if !source.document.timedLines.isEmpty {
+            let destination = track.parentDirectory
+                .appendingPathComponent(track.baseFilename)
+                .appendingPathExtension("lrc")
+            let content = lrcString(from: source.document.timedLines)
+            try content.write(to: destination, atomically: true, encoding: .utf8)
+            return
+        }
+
+        let plainText = source.document.plainText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !plainText.isEmpty else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+
+        let destination = track.parentDirectory
+            .appendingPathComponent(track.baseFilename)
+            .appendingPathExtension("txt")
+        try plainText.write(to: destination, atomically: true, encoding: .utf8)
+    }
+
+    private func saveArtworkSidecar(_ artwork: ArtworkOption, for track: AudioTrack) throws {
+        let destination = track.parentDirectory
+            .appendingPathComponent(track.baseFilename + ".cover")
+            .appendingPathExtension("png")
+
+        guard
+            let tiff = artwork.image.tiffRepresentation,
+            let rep = NSBitmapImageRep(data: tiff),
+            let png = rep.representation(using: .png, properties: [:])
+        else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+
+        try png.write(to: destination, options: .atomic)
+    }
+
+    private func lrcString(from lines: [TimedLyricLine]) -> String {
+        lines.map { line in
+            "[\(lrcTimestamp(for: line.time))]\(line.text)"
+        }
+        .joined(separator: "\n")
+    }
+
+    private func lrcTimestamp(for time: TimeInterval) -> String {
+        let totalHundredths = Int((time * 100).rounded())
+        let minutes = totalHundredths / 6000
+        let seconds = (totalHundredths % 6000) / 100
+        let hundredths = totalHundredths % 100
+        return String(format: "%02d:%02d.%02d", minutes, seconds, hundredths)
+    }
+
     private func startSupplementalAssetLoad(for track: AudioTrack, duration: TimeInterval) {
         supplementalAssetTask?.cancel()
         supplementalAssetTask = Task { [weak self] in
             guard let self else { return }
 
-            var resolvedArtwork: NSImage?
-            let embeddedAssets = await AudioAssetLoader.loadLyricsAndArtwork(for: track.url)
+            let embeddedAssets = await AudioAssetLoader.loadLyricsSourcesAndArtwork(for: track.url)
             guard !Task.isCancelled, self.currentTrack?.url == track.url else { return }
 
-            if !embeddedAssets.lyrics.isEmpty {
-                self.lyrics = embeddedAssets.lyrics
-                self.refreshCurrentLyricIndex()
-            } else {
-                let sidecarLyrics = LyricsParser.loadLyrics(for: track)
-                if !sidecarLyrics.isEmpty {
-                    self.lyrics = sidecarLyrics
-                    self.refreshCurrentLyricIndex()
+            if !embeddedAssets.lyricsSources.isEmpty {
+                self.applyLyricsSources(
+                    embeddedAssets.lyricsSources,
+                    preferredSelection: embeddedAssets.lyricsSources.first?.id,
+                    preserveSelection: false
+                )
+            }
+
+            let sidecarSources = LyricsParser.loadLyricsSources(for: track)
+            if !sidecarSources.isEmpty,
+               !Task.isCancelled,
+               self.currentTrack?.url == track.url {
+                if self.availableLyricsSources.isEmpty {
+                    self.applyLyricsSources(
+                        sidecarSources,
+                        preferredSelection: sidecarSources.first?.id,
+                        preserveSelection: false
+                    )
+                } else {
+                    self.mergeLyricsSources(sidecarSources)
                 }
             }
 
             if let artwork = embeddedAssets.artwork {
-                resolvedArtwork = artwork
-                self.currentArtwork = artwork
+                self.applyArtworkSources(
+                    [
+                        ArtworkOption(
+                            sourceID: artwork.kind.rawValue,
+                            kind: artwork.kind,
+                            image: artwork.image,
+                            rank: nil,
+                            title: track.title,
+                            artistName: track.artist,
+                            albumName: track.album,
+                            providerName: nil
+                        )
+                    ],
+                    preferredSelection: artwork.kind.rawValue,
+                    preserveSelection: false
+                )
             }
 
             let lyricsInfo = TrackSearchInfo(
@@ -1895,12 +2497,14 @@ final class PlayerViewModel: NSObject, ObservableObject {
                 duration: duration
             )
 
-            if self.lyrics.isEmpty,
-               let fetchedLyrics = await OnlineMetadataService.shared.fetchLyrics(for: track, info: lyricsInfo),
-               !Task.isCancelled,
-               self.currentTrack?.url == track.url {
-                self.lyrics = fetchedLyrics
-                self.refreshCurrentLyricIndex()
+            if self.availableLyricsSources.isEmpty {
+                self.didAttemptOnlineLyricsSearch = true
+                let fetchedLyricsSources = await OnlineMetadataService.shared.fetchLyricsSources(for: track, info: lyricsInfo)
+                if !Task.isCancelled,
+                   self.currentTrack?.url == track.url {
+                    self.onlineLyricsSearchResults = fetchedLyricsSources
+                    self.onlineLyricsResultCount = fetchedLyricsSources.count
+                }
             }
 
             let artworkInfo = TrackSearchInfo(
@@ -1909,18 +2513,17 @@ final class PlayerViewModel: NSObject, ObservableObject {
                 album: track.album,
                 duration: self.duration
             )
-            if resolvedArtwork == nil,
-               let fetchedArtwork = await OnlineMetadataService.shared.fetchArtwork(for: track, info: artworkInfo),
-               !Task.isCancelled,
-               self.currentTrack?.url == track.url {
-                resolvedArtwork = fetchedArtwork
-                self.currentArtwork = fetchedArtwork
-            }
-
-            if !Task.isCancelled,
-               self.currentTrack?.url == track.url,
-               resolvedArtwork == nil {
-                self.currentArtwork = nil
+            if self.availableArtworkSources.isEmpty {
+                self.didAttemptOnlineArtworkSearch = true
+                let fetchedArtworkSources = await OnlineMetadataService.shared.fetchArtworkOptions(for: track, info: artworkInfo)
+                if !Task.isCancelled,
+                   self.currentTrack?.url == track.url {
+                    self.onlineArtworkSearchResults = fetchedArtworkSources
+                    self.onlineArtworkResultCount = fetchedArtworkSources.count
+                    if fetchedArtworkSources.isEmpty {
+                        self.syncDisplayedArtwork()
+                    }
+                }
             }
         }
     }

@@ -8,17 +8,27 @@ struct TrackAssetMetadata {
     let album: String?
 }
 
+struct LoadedArtworkAsset {
+    let image: NSImage
+    let kind: ArtworkSourceKind
+}
+
 enum AudioAssetLoader {
     static func loadLyrics(for url: URL) async -> LyricsDocument {
         let asset = AVURLAsset(url: url)
-        return await loadLyrics(from: asset)
+        return await loadLyricsSources(from: asset).first?.document ?? LyricsDocument(timedLines: [], plainText: nil)
     }
 
-    static func loadLyricsAndArtwork(for url: URL) async -> (lyrics: LyricsDocument, artwork: NSImage?) {
+    static func loadLyricsSources(for url: URL) async -> [LyricsSourceOption] {
         let asset = AVURLAsset(url: url)
-        async let lyrics = loadLyrics(from: asset)
-        async let artwork = loadArtwork(from: asset)
-        return await (lyrics, artwork)
+        return await loadLyricsSources(from: asset)
+    }
+
+    static func loadLyricsSourcesAndArtwork(for url: URL) async -> (lyricsSources: [LyricsSourceOption], artwork: LoadedArtworkAsset?) {
+        let asset = AVURLAsset(url: url)
+        async let lyricsSources = loadLyricsSources(from: asset)
+        async let artwork = loadArtworkAsset(from: asset)
+        return await (lyricsSources, artwork)
     }
 
     static func loadMetadata(for url: URL) async -> TrackAssetMetadata {
@@ -53,43 +63,100 @@ enum AudioAssetLoader {
 
     static func loadArtwork(for url: URL) async -> NSImage? {
         let asset = AVURLAsset(url: url)
-        return await loadArtwork(from: asset)
+        return await loadArtworkAsset(from: asset)?.image
     }
 
-    private static func loadLyrics(from asset: AVURLAsset) async -> LyricsDocument {
+    static func loadArtworkAsset(for url: URL) async -> LoadedArtworkAsset? {
+        let asset = AVURLAsset(url: url)
+        return await loadArtworkAsset(from: asset)
+    }
 
+    private static func loadLyricsSources(from asset: AVURLAsset) async -> [LyricsSourceOption] {
+        var sources: [LyricsSourceOption] = []
         if let directLyrics = try? await asset.load(.lyrics),
            let document = lyricsDocument(from: directLyrics),
            !document.isEmpty {
-            return document
+            sources.append(
+                LyricsSourceOption(
+                    sourceID: LyricsSourceKind.embedded.rawValue,
+                    kind: .embedded,
+                    document: document
+                )
+            )
         }
 
-        let formats = (try? await asset.load(.availableMetadataFormats)) ?? []
-        for format in formats {
-            let items = (try? await asset.loadMetadata(for: format)) ?? []
-            for item in items {
-                if let candidate = await lyricCandidate(from: item),
-                   let document = lyricsDocument(from: candidate),
-                   !document.isEmpty {
-                    return document
+        if sources.isEmpty {
+            let formats = (try? await asset.load(.availableMetadataFormats)) ?? []
+            for format in formats {
+                let items = (try? await asset.loadMetadata(for: format)) ?? []
+                for item in items {
+                    if let candidate = await lyricCandidate(from: item),
+                       let document = lyricsDocument(from: candidate),
+                       !document.isEmpty {
+                        sources.append(
+                            LyricsSourceOption(
+                                sourceID: LyricsSourceKind.embedded.rawValue,
+                                kind: .embedded,
+                                document: document
+                            )
+                        )
+                        break
+                    }
+                }
+
+                if !sources.isEmpty {
+                    break
                 }
             }
         }
 
-        return LyricsDocument(timedLines: [], plainText: nil)
+        return sources
     }
 
-    private static func loadArtwork(from asset: AVURLAsset) async -> NSImage? {
+    private static func loadArtworkAsset(from asset: AVURLAsset) async -> LoadedArtworkAsset? {
         let items = (try? await asset.load(.commonMetadata)) ?? []
 
         for item in items where item.commonKey?.rawValue == AVMetadataKey.commonKeyArtwork.rawValue {
             if let data = try? await item.load(.dataValue),
                let image = NSImage(data: data) {
-                return image
+                return LoadedArtworkAsset(image: image, kind: .embedded)
             }
         }
 
+        if let sidecarArtwork = loadSidecarArtwork(for: asset.url) {
+            return sidecarArtwork
+        }
+
         return nil
+    }
+
+    private static func loadSidecarArtwork(for url: URL) -> LoadedArtworkAsset? {
+        for candidate in artworkSidecarCandidates(for: url) {
+            guard FileManager.default.fileExists(atPath: candidate.path) else { continue }
+            guard let image = NSImage(contentsOf: candidate) else { continue }
+            return LoadedArtworkAsset(image: image, kind: .sidecar)
+        }
+
+        return nil
+    }
+
+    private static func artworkSidecarCandidates(for url: URL) -> [URL] {
+        let base = url.deletingPathExtension()
+        let directory = url.deletingLastPathComponent()
+        let filename = base.lastPathComponent
+
+        let names = [
+            "\(filename).cover.png",
+            "\(filename).cover.jpg",
+            "\(filename).cover.jpeg",
+            "\(filename).cover.webp",
+            "\(filename).png",
+            "\(filename).jpg",
+            "\(filename).jpeg",
+            "\(filename).webp"
+        ]
+
+        return names.map { directory.appendingPathComponent($0) }
     }
 
     private static func lyricCandidate(from item: AVMetadataItem) async -> String? {

@@ -1,12 +1,64 @@
 import Foundation
 
-struct LyricsDocument {
+struct LyricsDocument: Equatable, Codable {
     let timedLines: [TimedLyricLine]
     let plainText: String?
 
     var isEmpty: Bool {
         timedLines.isEmpty && (plainText?.isEmpty ?? true)
     }
+}
+
+enum LyricsSourceKind: String, CaseIterable, Codable, Identifiable {
+    case embedded
+    case sidecarLRC
+    case sidecarTXT
+    case onlineSynced
+    case onlinePlain
+
+    var id: String { rawValue }
+
+    var isOnline: Bool {
+        switch self {
+        case .onlineSynced, .onlinePlain:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+struct LyricsSourceOption: Identifiable, Equatable, Codable {
+    let sourceID: String?
+    let kind: LyricsSourceKind
+    let document: LyricsDocument
+    let rank: Int?
+    let trackName: String?
+    let artistName: String?
+    let albumName: String?
+    let providerName: String?
+
+    init(
+        sourceID: String? = nil,
+        kind: LyricsSourceKind,
+        document: LyricsDocument,
+        rank: Int? = nil,
+        trackName: String? = nil,
+        artistName: String? = nil,
+        albumName: String? = nil,
+        providerName: String? = nil
+    ) {
+        self.sourceID = sourceID
+        self.kind = kind
+        self.document = document
+        self.rank = rank
+        self.trackName = trackName
+        self.artistName = artistName
+        self.albumName = albumName
+        self.providerName = providerName
+    }
+
+    var id: String { sourceID ?? kind.rawValue }
 }
 
 struct TimedLyricLine: Identifiable, Equatable, Codable {
@@ -33,7 +85,13 @@ enum LyricsParser {
     }
 
     static func loadLyrics(for track: AudioTrack) -> LyricsDocument {
-        for fileExtension in ["lrc", "txt"] {
+        loadLyricsSources(for: track).first?.document ?? LyricsDocument(timedLines: [], plainText: nil)
+    }
+
+    static func loadLyricsSources(for track: AudioTrack) -> [LyricsSourceOption] {
+        var sources: [LyricsSourceOption] = []
+
+        for (fileExtension, kind) in [("lrc", LyricsSourceKind.sidecarLRC), ("txt", .sidecarTXT)] {
             let candidate = track.parentDirectory
                 .appendingPathComponent(track.baseFilename)
                 .appendingPathExtension(fileExtension)
@@ -41,13 +99,19 @@ enum LyricsParser {
             guard FileManager.default.fileExists(atPath: candidate.path) else { continue }
             if let content = try? String(contentsOf: candidate, encoding: .utf8) {
                 let document = document(from: content)
-                if !document.isEmpty {
-                    return document
-                }
+                guard !document.isEmpty else { continue }
+
+                let source = LyricsSourceOption(
+                    sourceID: kind.rawValue,
+                    kind: kind,
+                    document: document
+                )
+                guard !sources.contains(where: { $0.id == source.id || $0.document == source.document }) else { continue }
+                sources.append(source)
             }
         }
 
-        return LyricsDocument(timedLines: [], plainText: nil)
+        return sources
     }
 
     static func parseSyncedLyrics(_ content: String) -> [TimedLyricLine] {

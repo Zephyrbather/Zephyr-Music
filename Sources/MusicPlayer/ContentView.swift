@@ -41,10 +41,12 @@ struct ContentView: View {
     @State private var isHistorySheetPresented = false
     @State private var isCreatePlaylistSheetPresented = false
     @State private var newPlaylistName = ""
+    @State private var pendingTrackForNewPlaylist: AudioTrack?
     @State private var isDeletePlaylistAlertPresented = false
     @State private var isImmersiveVolumeExpanded = false
     @State private var isImmersivePlaylistPreviewPresented = false
     @State private var immersivePlaylistPreviewHideToken = UUID()
+    @State private var isImmersiveMetadataControlsVisible = false
     @State private var suppressLyricAutoScrollAnimation = false
 
     private var theme: PlayerTheme {
@@ -72,7 +74,71 @@ struct ContentView: View {
     private var albumOptions: [String] { albumOptionsCache }
 
     private var filteredPlaylist: [(index: Int, track: AudioTrack)] { filteredPlaylistCache }
+    private var playlistCopyDestinations: [(id: UUID, title: String)] {
+        viewModel.playlists
+            .filter { $0.id != viewModel.selectedPlaylistID }
+            .map { ($0.id, viewModel.displayName(for: $0)) }
+    }
     private var usesImageBackground: Bool { viewModel.appTheme == .customImage && viewModel.customBackgroundImage != nil }
+    private var currentLyricsSourceTitle: String {
+        guard let selected = viewModel.displayedLyricsSource else {
+            return tr("暂无歌词", "No Lyrics")
+        }
+        return lyricsSourceTitle(for: selected)
+    }
+    private var lyricsPanelStatusText: String {
+        if viewModel.isSearchingLyricsOnline {
+            return tr("正在在线搜索歌词…", "Searching lyrics online...")
+        }
+        if viewModel.hasLyricsPreview {
+            return tr("预览中，可应用或恢复", "Previewing, apply or restore")
+        }
+        if viewModel.onlineLyricsResultCount > 0 {
+            return tr("已找到 \(viewModel.onlineLyricsResultCount) 条在线结果", "\(viewModel.onlineLyricsResultCount) online results found")
+        }
+        if viewModel.didAttemptOnlineLyricsSearch {
+            return tr("未找到可用的在线歌词", "No online lyrics found")
+        }
+        if viewModel.onlineLyricsSourcesCount > 0 {
+            return tr("可切换 \(viewModel.onlineLyricsSourcesCount) 条在线结果", "\(viewModel.onlineLyricsSourcesCount) online results available")
+        }
+        if let selected = viewModel.displayedLyricsSource,
+           let subtitle = lyricsSourceSubtitle(for: selected) {
+            return subtitle
+        }
+        return currentLyricsSourceTitle
+    }
+    private var currentArtworkSourceTitle: String {
+        guard let selected = viewModel.displayedArtworkSource else {
+            return tr("暂无封面", "No Artwork")
+        }
+        return artworkSourceTitle(for: selected)
+    }
+    private var artworkPanelStatusText: String {
+        if viewModel.isSearchingArtworkOnline {
+            return tr("正在在线搜索封面…", "Searching artwork online...")
+        }
+        if viewModel.hasArtworkPreview {
+            return tr("预览中，可应用或恢复", "Previewing, apply or restore")
+        }
+        if viewModel.onlineArtworkResultCount > 0 {
+            return tr("已找到 \(viewModel.onlineArtworkResultCount) 张在线封面", "\(viewModel.onlineArtworkResultCount) online covers found")
+        }
+        if viewModel.didAttemptOnlineArtworkSearch {
+            return tr("未找到可用的在线封面", "No online artwork found")
+        }
+        if viewModel.onlineArtworkSourcesCount > 0 {
+            return tr("可切换 \(viewModel.onlineArtworkSourcesCount) 张在线封面", "\(viewModel.onlineArtworkSourcesCount) online covers available")
+        }
+        if let selected = viewModel.displayedArtworkSource,
+           let subtitle = artworkSourceSubtitle(for: selected) {
+            return subtitle
+        }
+        return currentArtworkSourceTitle
+    }
+    private var immersiveMetadataSearchEmphasized: Bool {
+        viewModel.isSearchingOnlineMetadata || viewModel.hasOnlineMetadataPreview || viewModel.hasOnlineMetadataResults
+    }
     private var immersivePreviewPlaylist: PlaylistCollection? {
         let targetID = viewModel.currentPlayingPlaylistID ?? viewModel.selectedPlaylistID
         return viewModel.playlists.first(where: { $0.id == targetID }) ?? viewModel.playlists.first
@@ -155,6 +221,7 @@ struct ContentView: View {
         .onChange(of: viewModel.currentTrack?.url.standardizedFileURL.path) { _ in
             lyricScrollAnchor = .center
             suppressLyricAutoScrollAnimation = true
+            isImmersiveMetadataControlsVisible = false
         }
         .onReceive(viewModel.$playlistSearchFocusRequest) { _ in
             isPlaylistSearchFocused = true
@@ -175,6 +242,7 @@ struct ContentView: View {
             if newValue != .immersive {
                 isImmersiveVolumeExpanded = false
                 isImmersivePlaylistPreviewPresented = false
+                isImmersiveMetadataControlsVisible = false
             }
             resizeWindowIfNeeded(for: newValue)
         }
@@ -210,7 +278,10 @@ struct ContentView: View {
         .sheet(isPresented: $isHistorySheetPresented) {
             ListeningHistorySheet(viewModel: viewModel, theme: theme, language: language)
         }
-        .sheet(isPresented: $isCreatePlaylistSheetPresented) {
+        .sheet(isPresented: $isCreatePlaylistSheetPresented, onDismiss: {
+            newPlaylistName = ""
+            pendingTrackForNewPlaylist = nil
+        }) {
             createPlaylistSheet
         }
         .alert(tr("删除歌单", "Delete Playlist"), isPresented: $isDeletePlaylistAlertPresented) {
@@ -265,7 +336,7 @@ struct ContentView: View {
                 max: 380
             )
             let lyricWidth = clamp(size.width * (compactWidth ? 0.27 : 0.24), min: 200, max: 280)
-            let lyricHeight = clamp(size.height * (compactHeight ? 0.27 : 0.34), min: 160, max: 280)
+            let lyricHeight = clamp(size.height * (compactHeight ? 0.42 : 0.52), min: 240, max: 420)
             let contentSpacing = clamp(size.width * 0.04, min: 16, max: 44)
             let titleFontSize = clamp(size.width * 0.021, min: compactHeight ? 20 : 22, max: 34)
             let lyricProminentFont = clamp(min(size.width * 0.021, size.height * 0.04), min: 20, max: 34)
@@ -273,8 +344,8 @@ struct ContentView: View {
             let lyricTimestampWidth = clamp(size.width * 0.036, min: 36, max: 52)
             let transportWidth = clamp(size.width * 0.36, min: 300, max: 430)
             let discInfoSpacing = clamp(size.height * 0.016, min: 10, max: 18)
-            let topSectionSpacing = clamp(size.height * 0.02, min: 10, max: 22)
-            let bottomSectionSpacing = clamp(size.height * 0.025, min: 12, max: 24)
+            let topSectionSpacing = clamp(size.height * 0.016, min: 8, max: 18)
+            let bottomSectionSpacing = clamp(size.height * 0.012, min: 6, max: 14)
             let sidePanelWidth = viewModel.isEqualizerExpanded
                 ? clamp(size.width * (compactWidth ? 0.32 : 0.3), min: 260, max: 380)
                 : lyricWidth
@@ -344,7 +415,7 @@ struct ContentView: View {
     }
 
     private var header: some View {
-        HStack {
+        HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Zephyr Player")
                     .font(.system(size: 30, weight: .bold, design: .serif))
@@ -352,41 +423,59 @@ struct ContentView: View {
                     .tracking(0.8)
             }
 
-            Spacer()
+            Spacer(minLength: 12)
 
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 playlistSwitcher
 
-                Button(tr("均衡器", "Equalizer")) {
+                compactHeaderIconButton {
                     viewModel.isEqualizerExpanded.toggle()
+                } label: {
+                    Image(systemName: viewModel.isEqualizerExpanded ? "slider.horizontal.below.square.filled.and.square" : "slider.horizontal.3")
                 }
-                .fixedSize()
+                .help(viewModel.isEqualizerExpanded ? tr("隐藏均衡器", "Hide equalizer") : tr("显示均衡器", "Show equalizer"))
 
                 dataTransferMenu
 
+                batchScrapeHeaderButton
+                .disabled(viewModel.playlist.isEmpty)
+                .help(viewModel.isBatchScrapingMissingMetadata ? viewModel.batchScrapeProgressText : tr("为当前歌单缺失的歌词和封面一键刮削", "Auto scrape missing lyrics and artwork for the selected playlist"))
+
                 themeMenu
 
-                Button(viewModel.interfaceMode.title(in: language)) {
+                compactHeaderIconButton {
                     viewModel.toggleInterfaceMode()
+                } label: {
+                    Image(systemName: viewModel.interfaceMode.symbolName)
                 }
-                .fixedSize()
+                .help(viewModel.interfaceMode.title(in: language))
 
-                Button(tr("听歌历史", "Listening History")) {
+                compactHeaderIconButton {
                     isHistorySheetPresented = true
+                } label: {
+                    Image(systemName: "clock.arrow.circlepath")
                 }
-                .fixedSize()
+                .help(tr("听歌历史", "Listening History"))
 
-                Button(tr("扫描文件夹", "Scan Folder")) {
-                    viewModel.openFolder()
-                }
-                .fixedSize()
+                Menu {
+                    Button(tr("添加音频", "Add Audio")) {
+                        viewModel.openFiles()
+                    }
 
-                Button(tr("添加音频", "Add Audio")) {
-                    viewModel.openFiles()
+                    Button(tr("扫描文件夹", "Scan Folder")) {
+                        viewModel.openFolder()
+                    }
+                } label: {
+                    compactHeaderIconLabel(systemName: "plus.circle")
                 }
-                .fixedSize()
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .help(tr("添加音频或扫描文件夹", "Add audio or scan folders"))
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(18)
+        .background(panelBackground(primary: true))
     }
 
     private var compactHeader: some View {
@@ -416,6 +505,24 @@ struct ContentView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
+
+                compactHeaderIconButton {
+                    viewModel.searchArtworkOnlineForCurrentTrack()
+                } label: {
+                    Image(systemName: viewModel.isSearchingArtworkOnline ? "arrow.trianglehead.2.clockwise.rotate.90" : "magnifyingglass")
+                }
+                .disabled(viewModel.currentTrack == nil || viewModel.isSearchingArtworkOnline)
+                .help(tr("在线搜索当前歌曲封面", "Search artwork online for the current track"))
+
+                Menu {
+                    artworkSourceMenuContent
+                } label: {
+                    compactHeaderIconLabel(systemName: "photo.on.rectangle")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .disabled(viewModel.availableArtworkSources.isEmpty && viewModel.onlineArtworkSearchResults.isEmpty)
+                .help(tr("切换当前歌曲封面", "Switch artwork source for the current track"))
 
                 compactHeaderIconButton {
                     viewModel.toggleInterfaceMode()
@@ -448,7 +555,19 @@ struct ContentView: View {
     private var nowPlayingCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 18) {
-                immersiveToggleArtworkButton(size: 134, cornerRadius: 20)
+                VStack(alignment: .leading, spacing: 10) {
+                    immersiveToggleArtworkButton(size: 134, cornerRadius: 20)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(artworkPanelStatusText)
+                            .font(.caption)
+                            .foregroundStyle(theme.secondaryText)
+                            .lineLimit(1)
+
+                        artworkControls(compact: false)
+                    }
+                    .frame(width: 190, alignment: .leading)
+                }
 
                 VStack(alignment: .leading, spacing: 14) {
                     Text(tr("正在播放", "Now Playing"))
@@ -473,7 +592,14 @@ struct ContentView: View {
     private var compactNowPlayingCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                immersiveToggleArtworkButton(size: 54, cornerRadius: 12)
+                VStack(alignment: .leading, spacing: 6) {
+                    immersiveToggleArtworkButton(size: 54, cornerRadius: 12)
+                    artworkControls(
+                        compact: true,
+                        showsOnlineSearchButton: false,
+                        showsSourceSwitcher: false
+                    )
+                }
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(viewModel.currentTrack?.title ?? tr("未选择歌曲", "No Track Selected"))
@@ -838,11 +964,16 @@ struct ContentView: View {
                         theme: theme,
                         language: language,
                         isQueuedNext: viewModel.queuedTrackPaths.contains(item.track.url.standardizedFileURL.path),
-                        query: playlistSearchText
+                        query: playlistSearchText,
+                        playlistDestinations: playlistCopyDestinations
                     ) {
                         viewModel.playSelected(track: item.track)
                     } queueNextAction: {
                         viewModel.queueTrackNext(item.track, in: viewModel.selectedPlaylistID)
+                    } addToNewPlaylistAction: {
+                        presentCreatePlaylistSheet(adding: item.track)
+                    } addToPlaylistAction: { playlistID in
+                        viewModel.addTrack(item.track, to: playlistID)
                     }
                 }
                 .onDelete(perform: removeFilteredTracks)
@@ -920,11 +1051,16 @@ struct ContentView: View {
                         theme: theme,
                         language: language,
                         isQueuedNext: viewModel.queuedTrackPaths.contains(item.track.url.standardizedFileURL.path),
-                        query: playlistSearchText
+                        query: playlistSearchText,
+                        playlistDestinations: playlistCopyDestinations
                     ) {
                         viewModel.playSelected(track: item.track)
                     } queueNextAction: {
                         viewModel.queueTrackNext(item.track, in: viewModel.selectedPlaylistID)
+                    } addToNewPlaylistAction: {
+                        presentCreatePlaylistSheet(adding: item.track)
+                    } addToPlaylistAction: { playlistID in
+                        viewModel.addTrack(item.track, to: playlistID)
                     }
                 }
                 .onDelete(perform: removeFilteredTracks)
@@ -991,12 +1127,9 @@ struct ContentView: View {
             .menuIndicator(viewModel.interfaceMode == .compact ? .hidden : .visible)
 
             Button {
-                newPlaylistName = ""
-                isCreatePlaylistSheetPresented = true
+                presentCreatePlaylistSheet()
             } label: {
-                Image(systemName: "text.badge.plus")
-                    .symbolRenderingMode(.monochrome)
-                    .foregroundStyle(theme.primaryText)
+                compactHeaderIconLabel(systemName: "text.badge.plus")
             }
             .buttonStyle(.plain)
             .help(tr("新建歌单", "New Playlist"))
@@ -1004,15 +1137,12 @@ struct ContentView: View {
             Button {
                 isDeletePlaylistAlertPresented = true
             } label: {
-                Image(systemName: "trash")
-                    .symbolRenderingMode(.monochrome)
-                    .foregroundStyle(theme.primaryText)
+                compactHeaderIconLabel(systemName: "trash")
             }
             .buttonStyle(.plain)
             .help(tr("删除当前歌单", "Delete Current Playlist"))
             .disabled(viewModel.playlists.count <= 1)
         }
-        .frame(maxWidth: .infinity)
     }
 
     private var playlistSearchBar: some View {
@@ -1175,6 +1305,40 @@ struct ContentView: View {
             .font(.system(size: 12, weight: .semibold))
     }
 
+    private var batchScrapeHeaderButton: some View {
+        Button {
+            viewModel.scrapeMissingMetadataInSelectedPlaylist()
+        } label: {
+            ZStack {
+                if viewModel.isBatchScrapingMissingMetadata {
+                    Circle()
+                        .stroke(theme.border.opacity(0.65), lineWidth: 2)
+
+                    Circle()
+                        .trim(from: 0, to: batchScrapeProgressValue)
+                        .stroke(
+                            theme.accent,
+                            style: StrokeStyle(lineWidth: 2, lineCap: .round)
+                        )
+                        .rotationEffect(.degrees(-90))
+                }
+
+                Image(systemName: "wand.and.stars")
+                    .symbolRenderingMode(.monochrome)
+                    .foregroundStyle(theme.primaryText)
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .frame(width: 24, height: 24)
+        }
+        .buttonStyle(.plain)
+        .controlSize(.small)
+    }
+
+    private var batchScrapeProgressValue: CGFloat {
+        guard viewModel.batchScrapeTargetCount > 0 else { return 0 }
+        return min(max(CGFloat(viewModel.batchScrapeCompletedCount) / CGFloat(viewModel.batchScrapeTargetCount), 0), 1)
+    }
+
     private var immersiveHeader: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 6) {
@@ -1194,6 +1358,8 @@ struct ContentView: View {
 
             HStack(spacing: 12) {
                 immersivePlaylistPreviewTrigger
+
+                immersiveMetadataSearchButton
 
                 immersiveHeaderIconButton(
                     systemName: viewModel.isDesktopLyricsVisible ? "quote.bubble.fill" : "quote.bubble",
@@ -1276,6 +1442,27 @@ struct ContentView: View {
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
+    }
+
+    private var immersiveMetadataSearchButton: some View {
+        Button {
+            isImmersiveMetadataControlsVisible = true
+            viewModel.searchOnlineMetadataForCurrentTrack()
+        } label: {
+            Group {
+                if viewModel.isSearchingOnlineMetadata {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.78)
+                        .frame(width: 24, height: 18)
+                } else {
+                    immersiveIconLabel(systemName: "magnifyingglass", emphasized: immersiveMetadataSearchEmphasized)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(viewModel.currentTrack == nil || viewModel.isSearchingOnlineMetadata)
+        .help(tr("在线搜索歌词和封面", "Search lyrics and artwork online"))
     }
 
     private var immersiveThemeMenu: some View {
@@ -1525,6 +1712,20 @@ struct ContentView: View {
                 .lineLimit(2)
                 .minimumScaleFactor(0.8)
                 .fixedSize(horizontal: false, vertical: true)
+
+            VStack(spacing: 4) {
+                Text(artworkPanelStatusText)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(theme.secondaryText)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(1)
+
+                artworkControls(
+                    compact: true,
+                    showsOnlineSearchButton: false,
+                    showsSourceSwitcher: isImmersiveMetadataControlsVisible
+                )
+            }
         }
         .frame(maxWidth: .infinity)
     }
@@ -1712,7 +1913,7 @@ struct ContentView: View {
         case .compact:
             return 126
         case .full:
-            return 140
+            return 128
         case .immersive:
             return 190
         }
@@ -1739,26 +1940,35 @@ struct ContentView: View {
         regularFontSize: CGFloat,
         timestampWidth: CGFloat
     ) -> some View {
-        lyricsContent(
-            rowSpacing: rowSpacing,
-            prominentFontSize: prominentFontSize,
-            regularFontSize: regularFontSize,
-            timestampWidth: timestampWidth,
-            showsRowBackgrounds: false,
-            showsScrollIndicators: false
-        )
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .mask {
-            LinearGradient(
-                stops: [
-                    .init(color: .clear, location: 0),
-                    .init(color: .black, location: 0.08),
-                    .init(color: .black, location: 0.92),
-                    .init(color: .clear, location: 1)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
+        VStack(alignment: .leading, spacing: 10) {
+            lyricsPanelControls(
+                compact: true,
+                showsOnlineSearchButton: false,
+                showsSourceSwitcher: isImmersiveMetadataControlsVisible
             )
+
+            lyricsContent(
+                rowSpacing: rowSpacing,
+                prominentFontSize: prominentFontSize,
+                regularFontSize: regularFontSize,
+                timestampWidth: timestampWidth,
+                showsTimestamps: false,
+                showsRowBackgrounds: false,
+                showsScrollIndicators: false
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .mask {
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0),
+                        .init(color: .black, location: 0.08),
+                        .init(color: .black, location: 0.92),
+                        .init(color: .clear, location: 1)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
         }
         .padding(.vertical, contentPadding)
         .padding(.horizontal, contentPadding * 0.2)
@@ -1784,8 +1994,7 @@ struct ContentView: View {
         timestampWidth: CGFloat
     ) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(tr("歌词", "Lyrics"))
-                .font(titleFont)
+            lyricsPanelControls(compact: false, titleFont: titleFont)
 
             lyricsContent(
                 rowSpacing: rowSpacing,
@@ -1804,6 +2013,7 @@ struct ContentView: View {
         prominentFontSize: CGFloat,
         regularFontSize: CGFloat,
         timestampWidth: CGFloat,
+        showsTimestamps: Bool = true,
         showsRowBackgrounds: Bool = true,
         showsScrollIndicators: Bool = true
     ) -> some View {
@@ -1820,6 +2030,7 @@ struct ContentView: View {
                                 prominentFontSize: prominentFontSize,
                                 regularFontSize: regularFontSize,
                                 timestampWidth: timestampWidth,
+                                showsTimestamp: showsTimestamps,
                                 showsBackgrounds: showsRowBackgrounds,
                                 onSelect: {
                                     lyricScrollAnchor = UnitPoint(x: 0.5, y: 0.68)
@@ -1868,6 +2079,316 @@ struct ContentView: View {
         }
     }
 
+    private func lyricsPanelControls(
+        compact: Bool,
+        titleFont: Font = .headline,
+        showsOnlineSearchButton: Bool = true,
+        showsSourceSwitcher: Bool = true
+    ) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            VStack(alignment: .leading, spacing: compact ? 2 : 4) {
+                Text(tr("歌词", "Lyrics"))
+                    .font(compact ? .subheadline.weight(.semibold) : titleFont)
+
+                Text(lyricsPanelStatusText)
+                    .font(compact ? .caption2 : .caption)
+                    .foregroundStyle(theme.secondaryText)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 12)
+
+            HStack(spacing: compact ? 8 : 10) {
+                if showsSourceSwitcher {
+                    lyricsSourceSwitcher(compact: compact)
+                }
+                if showsOnlineSearchButton {
+                    lyricsOnlineSearchButton(compact: compact)
+                }
+                if viewModel.hasLyricsPreview {
+                    previewActionButton(
+                        systemName: "checkmark",
+                        compact: compact,
+                        helpText: tr("应用预览歌词", "Apply previewed lyrics")
+                    ) {
+                        viewModel.applyPreviewLyricsSource()
+                    }
+
+                    previewActionButton(
+                        systemName: "arrow.uturn.backward",
+                        compact: compact,
+                        helpText: tr("恢复原歌词", "Restore original lyrics")
+                    ) {
+                        viewModel.restoreLyricsSourceSelection()
+                    }
+                }
+            }
+        }
+    }
+
+    private func lyricsSourceSwitcher(compact: Bool) -> some View {
+        Menu {
+            if !viewModel.availableLyricsSources.isEmpty {
+                ForEach(viewModel.availableLyricsSources) { source in
+                    Button {
+                        viewModel.selectLyricsSource(source.id)
+                    } label: {
+                        let menuTitle = lyricsSourceMenuTitle(for: source)
+                        if viewModel.selectedLyricsSourceID == source.id && !viewModel.hasLyricsPreview {
+                            Label(menuTitle, systemImage: "checkmark")
+                        } else {
+                            Text(menuTitle)
+                        }
+                    }
+                }
+            }
+
+            if !viewModel.availableLyricsSources.isEmpty && !viewModel.onlineLyricsSearchResults.isEmpty {
+                Divider()
+            }
+
+            if !viewModel.onlineLyricsSearchResults.isEmpty {
+                ForEach(viewModel.onlineLyricsSearchResults) { source in
+                    Button {
+                        viewModel.previewLyricsSearchResult(source.id)
+                    } label: {
+                        let menuTitle = tr("预览", "Preview") + " · " + lyricsSourceMenuTitle(for: source)
+                        if viewModel.previewLyricsSource?.id == source.id {
+                            Label(menuTitle, systemImage: "eye")
+                        } else {
+                            Text(menuTitle)
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: compact ? 5 : 6) {
+                Image(systemName: "music.note.list")
+                    .font(compact ? .caption2 : .caption.weight(.semibold))
+
+                Text(currentLyricsSourceTitle)
+                    .lineLimit(1)
+
+                if viewModel.availableLyricsSources.count > 1 {
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.bold))
+                }
+            }
+            .foregroundStyle(theme.primaryText)
+            .padding(.horizontal, compact ? 10 : 12)
+            .padding(.vertical, compact ? 6 : 8)
+            .background(
+                RoundedRectangle(cornerRadius: compact ? 12 : 14, style: .continuous)
+                    .fill(theme.panel)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: compact ? 12 : 14, style: .continuous)
+                            .stroke(theme.border, lineWidth: 1)
+                    )
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .disabled(viewModel.availableLyricsSources.isEmpty && viewModel.onlineLyricsSearchResults.isEmpty)
+    }
+
+    private func lyricsOnlineSearchButton(compact: Bool) -> some View {
+        Button {
+            viewModel.searchLyricsOnlineForCurrentTrack()
+        } label: {
+            Group {
+                if viewModel.isSearchingLyricsOnline {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(compact ? 0.72 : 0.78)
+                } else {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: compact ? 11 : 12, weight: .semibold))
+                }
+            }
+            .foregroundStyle(theme.primaryText)
+            .frame(width: compact ? 22 : 24, height: compact ? 22 : 24)
+            .background(
+                Circle()
+                    .fill(theme.panel)
+                    .overlay(
+                        Circle()
+                            .stroke(theme.border, lineWidth: 1)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(viewModel.currentTrack == nil || viewModel.isSearchingLyricsOnline)
+        .help(tr("在线搜索当前歌曲歌词", "Search lyrics online for the current track"))
+    }
+
+    private func previewActionButton(
+        systemName: String,
+        compact: Bool,
+        helpText: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: compact ? 11 : 12, weight: .semibold))
+                .foregroundStyle(theme.primaryText)
+                .frame(width: compact ? 22 : 24, height: compact ? 22 : 24)
+                .background(
+                    Circle()
+                        .fill(theme.panel)
+                        .overlay(
+                            Circle()
+                                .stroke(theme.border, lineWidth: 1)
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+        .help(helpText)
+    }
+
+    private func artworkControls(
+        compact: Bool,
+        showsOnlineSearchButton: Bool = true,
+        showsSourceSwitcher: Bool = true
+    ) -> some View {
+        HStack(spacing: compact ? 8 : 10) {
+            if showsSourceSwitcher {
+                artworkSourceSwitcher(compact: compact)
+            }
+            if showsOnlineSearchButton {
+                artworkOnlineSearchButton(compact: compact)
+            }
+            if viewModel.hasArtworkPreview {
+                previewActionButton(
+                    systemName: "checkmark",
+                    compact: compact,
+                    helpText: tr("应用预览封面", "Apply previewed artwork")
+                ) {
+                    viewModel.applyPreviewArtworkSource()
+                }
+
+                previewActionButton(
+                    systemName: "arrow.uturn.backward",
+                    compact: compact,
+                    helpText: tr("恢复原封面", "Restore original artwork")
+                ) {
+                    viewModel.restoreArtworkSourceSelection()
+                }
+            }
+        }
+    }
+
+    private func artworkSourceSwitcher(compact: Bool) -> some View {
+        Menu {
+            artworkSourceMenuContent
+        } label: {
+            HStack(spacing: compact ? 5 : 6) {
+                Image(systemName: "photo")
+                    .font(compact ? .caption2 : .caption.weight(.semibold))
+
+                Text(currentArtworkSourceTitle)
+                    .lineLimit(1)
+
+                if viewModel.availableArtworkSources.count + viewModel.onlineArtworkSearchResults.count > 1 {
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.bold))
+                }
+            }
+            .foregroundStyle(theme.primaryText)
+            .padding(.horizontal, compact ? 10 : 12)
+            .padding(.vertical, compact ? 6 : 8)
+            .background(
+                RoundedRectangle(cornerRadius: compact ? 12 : 14, style: .continuous)
+                    .fill(theme.panel)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: compact ? 12 : 14, style: .continuous)
+                            .stroke(theme.border, lineWidth: 1)
+                    )
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .disabled(viewModel.availableArtworkSources.isEmpty && viewModel.onlineArtworkSearchResults.isEmpty)
+    }
+
+    @ViewBuilder
+    private var artworkSourceMenuContent: some View {
+        if viewModel.hasArtworkPreview {
+            Button(tr("应用预览封面", "Apply Preview Artwork")) {
+                viewModel.applyPreviewArtworkSource()
+            }
+
+            Button(tr("恢复原封面", "Restore Original Artwork")) {
+                viewModel.restoreArtworkSourceSelection()
+            }
+
+            if !viewModel.availableArtworkSources.isEmpty || !viewModel.onlineArtworkSearchResults.isEmpty {
+                Divider()
+            }
+        }
+
+        if !viewModel.availableArtworkSources.isEmpty {
+            ForEach(viewModel.availableArtworkSources) { source in
+                Button {
+                    viewModel.selectArtworkSource(source.id)
+                } label: {
+                    let menuTitle = artworkSourceMenuTitle(for: source)
+                    if viewModel.selectedArtworkSourceID == source.id && !viewModel.hasArtworkPreview {
+                        Label(menuTitle, systemImage: "checkmark")
+                    } else {
+                        Text(menuTitle)
+                    }
+                }
+            }
+        }
+
+        if !viewModel.availableArtworkSources.isEmpty && !viewModel.onlineArtworkSearchResults.isEmpty {
+            Divider()
+        }
+
+        if !viewModel.onlineArtworkSearchResults.isEmpty {
+            ForEach(viewModel.onlineArtworkSearchResults) { source in
+                Button {
+                    viewModel.previewArtworkSearchResult(source.id)
+                } label: {
+                    let menuTitle = tr("预览", "Preview") + " · " + artworkSourceMenuTitle(for: source)
+                    if viewModel.previewArtworkSource?.id == source.id {
+                        Label(menuTitle, systemImage: "eye")
+                    } else {
+                        Text(menuTitle)
+                    }
+                }
+            }
+        }
+    }
+
+    private func artworkOnlineSearchButton(compact: Bool) -> some View {
+        Button {
+            viewModel.searchArtworkOnlineForCurrentTrack()
+        } label: {
+            Group {
+                if viewModel.isSearchingArtworkOnline {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(compact ? 0.72 : 0.78)
+                } else {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: compact ? 11 : 12, weight: .semibold))
+                }
+            }
+            .foregroundStyle(theme.primaryText)
+            .frame(width: compact ? 22 : 24, height: compact ? 22 : 24)
+            .background(
+                Circle()
+                    .fill(theme.panel)
+                    .overlay(
+                        Circle()
+                            .stroke(theme.border, lineWidth: 1)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(viewModel.currentTrack == nil || viewModel.isSearchingArtworkOnline)
+        .help(tr("在线搜索当前歌曲封面", "Search artwork online for the current track"))
+    }
+
     private var transportSlider: some View {
         VStack(spacing: 8) {
             Slider(
@@ -1903,6 +2424,119 @@ struct ContentView: View {
             viewModel.currentTrack?.album ?? tr("未知专辑", "Unknown Album"),
             viewModel.currentTrack?.fileExtension ?? tr("等待加载", "Loading")
         ].joined(separator: " · ")
+    }
+
+    private func lyricsSourceTitle(for source: LyricsSourceOption) -> String {
+        switch source.kind {
+        case .embedded:
+            return tr("内嵌歌词", "Embedded")
+        case .sidecarLRC:
+            return tr("外挂 LRC", "Sidecar LRC")
+        case .sidecarTXT:
+            return tr("外挂 TXT", "Sidecar TXT")
+        case .onlineSynced:
+            let fallback = tr("在线逐行歌词", "Online Synced")
+            return lyricsOnlineTitle(for: source, fallback: fallback)
+        case .onlinePlain:
+            let fallback = tr("在线纯文本歌词", "Online Plain")
+            return lyricsOnlineTitle(for: source, fallback: fallback)
+        }
+    }
+
+    private func lyricsSourceSubtitle(for source: LyricsSourceOption) -> String? {
+        guard source.kind.isOnline else { return nil }
+
+        var details: [String] = []
+        if let provider = source.providerName?.trimmingCharacters(in: .whitespacesAndNewlines), !provider.isEmpty {
+            details.append(provider)
+        }
+        details.append(source.kind == .onlineSynced ? tr("逐行歌词", "Synced") : tr("纯文本歌词", "Plain"))
+        if let album = source.albumName, !album.isEmpty {
+            details.append(album)
+        }
+
+        return details.isEmpty ? nil : details.joined(separator: " · ")
+    }
+
+    private func lyricsSourceMenuTitle(for source: LyricsSourceOption) -> String {
+        var details = [lyricsSourceTitle(for: source)]
+        if source.kind.isOnline, let provider = source.providerName?.trimmingCharacters(in: .whitespacesAndNewlines), !provider.isEmpty {
+            details.append(provider)
+        }
+        if source.kind.isOnline, let rank = source.rank {
+            details.append("#" + String(rank))
+        }
+        return details.joined(separator: " · ")
+    }
+
+    private func artworkSourceTitle(for source: ArtworkOption) -> String {
+        switch source.kind {
+        case .embedded:
+            return tr("内嵌封面", "Embedded")
+        case .sidecar:
+            return tr("外挂封面", "Sidecar Cover")
+        case .online:
+            let fallback = tr("在线封面", "Online Cover")
+            return artworkOnlineTitle(for: source, fallback: fallback)
+        }
+    }
+
+    private func artworkSourceSubtitle(for source: ArtworkOption) -> String? {
+        guard source.kind.isOnline else { return nil }
+
+        var details: [String] = []
+        if let provider = source.providerName?.trimmingCharacters(in: .whitespacesAndNewlines), !provider.isEmpty {
+            details.append(provider)
+        } else {
+            details.append(tr("在线封面", "Online"))
+        }
+        if let album = source.albumName?.trimmingCharacters(in: .whitespacesAndNewlines), !album.isEmpty {
+            details.append(album)
+        }
+        return details.joined(separator: " · ")
+    }
+
+    private func artworkSourceMenuTitle(for source: ArtworkOption) -> String {
+        var details = [artworkSourceTitle(for: source)]
+        if source.kind.isOnline, let provider = source.providerName?.trimmingCharacters(in: .whitespacesAndNewlines), !provider.isEmpty {
+            details.append(provider)
+        }
+        if source.kind.isOnline, let rank = source.rank {
+            details.append("#" + String(rank))
+        }
+        return details.joined(separator: " · ")
+    }
+
+    private func lyricsOnlineTitle(for source: LyricsSourceOption, fallback: String) -> String {
+        let artist = source.artistName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = source.trackName?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let artist, !artist.isEmpty, let title, !title.isEmpty {
+            return artist + " - " + title
+        }
+        if let title, !title.isEmpty {
+            return title
+        }
+        if let rank = source.rank {
+            return fallback + " \(rank)"
+        }
+        return fallback
+    }
+
+    private func artworkOnlineTitle(for source: ArtworkOption, fallback: String) -> String {
+        let artist = source.artistName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = source.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let artist, !artist.isEmpty, let title, !title.isEmpty {
+            return artist + " - " + title
+        }
+        if let title, !title.isEmpty {
+            return title
+        }
+        if let rank = source.rank {
+            return fallback + " \(rank)"
+        }
+        return fallback
     }
 
     private func scrollLyrics(with proxy: ScrollViewProxy, to index: Int, anchor: UnitPoint, animated: Bool) {
@@ -2039,7 +2673,10 @@ struct ContentView: View {
                 }
 
                 Button(tr("创建", "Create")) {
-                    viewModel.createPlaylist(named: newPlaylistName)
+                    let playlist = viewModel.createPlaylist(named: newPlaylistName)
+                    if let pendingTrackForNewPlaylist {
+                        viewModel.addTrack(pendingTrackForNewPlaylist, to: playlist.id)
+                    }
                     isCreatePlaylistSheetPresented = false
                 }
                 .keyboardShortcut(.defaultAction)
@@ -2048,6 +2685,12 @@ struct ContentView: View {
         .padding(20)
         .frame(width: 360)
         .background(backgroundView)
+    }
+
+    private func presentCreatePlaylistSheet(adding track: AudioTrack? = nil) {
+        pendingTrackForNewPlaylist = track
+        newPlaylistName = ""
+        isCreatePlaylistSheetPresented = true
     }
 
     private func panelBackground(primary: Bool) -> some View {
@@ -2413,6 +3056,7 @@ private struct LyricJumpRow: View {
     let prominentFontSize: CGFloat
     let regularFontSize: CGFloat
     let timestampWidth: CGFloat
+    let showsTimestamp: Bool
     let showsBackgrounds: Bool
     let onSelect: () -> Void
 
@@ -2421,10 +3065,12 @@ private struct LyricJumpRow: View {
     var body: some View {
         Button(action: onSelect) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text(formatLyricTimestamp(time))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(prominent ? theme.accent : (isHovered ? theme.accent : theme.secondaryText))
-                    .frame(width: timestampWidth, alignment: .leading)
+                if showsTimestamp {
+                    Text(formatLyricTimestamp(time))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(prominent ? theme.accent : (isHovered ? theme.accent : theme.secondaryText))
+                        .frame(width: timestampWidth, alignment: .leading)
+                }
 
                 Text(text)
                     .font(prominent ? .system(size: prominentFontSize, weight: .bold) : .system(size: regularFontSize, weight: .medium))
@@ -2453,10 +3099,10 @@ private struct LyricJumpRow: View {
     }
 
     private var backgroundFill: Color {
-        guard showsBackgrounds else { return .clear }
         if prominent {
             return theme.lyricGlow
         }
+        guard showsBackgrounds else { return .clear }
         if isHovered {
             return theme.accentSoft.opacity(0.22)
         }
@@ -2608,8 +3254,11 @@ private struct PlaylistRow: View {
     let language: PlayerViewModel.AppLanguage
     let isQueuedNext: Bool
     let query: String
+    let playlistDestinations: [(id: UUID, title: String)]
     let action: () -> Void
     let queueNextAction: () -> Void
+    let addToNewPlaylistAction: () -> Void
+    let addToPlaylistAction: (UUID) -> Void
 
     var body: some View {
         Button(action: action) {
@@ -2644,6 +3293,24 @@ private struct PlaylistRow: View {
             Button(language.pick("下一首播放", "Play Next")) {
                 queueNextAction()
             }
+
+            Button(language.pick("添加到新歌单", "Add to New Playlist")) {
+                addToNewPlaylistAction()
+            }
+
+            Menu(language.pick("添加到歌单", "Add to Playlist")) {
+                if playlistDestinations.isEmpty {
+                    Button(language.pick("没有其他歌单", "No Other Playlists")) {}
+                        .disabled(true)
+                } else {
+                    ForEach(playlistDestinations, id: \.id) { playlist in
+                        Button(playlist.title) {
+                            addToPlaylistAction(playlist.id)
+                        }
+                    }
+                }
+            }
+            .disabled(playlistDestinations.isEmpty)
         }
         .listRowBackground(Color.clear)
     }
