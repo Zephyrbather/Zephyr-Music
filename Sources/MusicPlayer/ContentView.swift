@@ -1,6 +1,20 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+private struct PlaylistListEntry: Identifiable, Equatable {
+    let index: Int
+    let track: AudioTrack
+
+    var id: String {
+        track.url.standardizedFileURL.path
+    }
+}
+
+private struct PlaylistDestinationOption: Identifiable, Equatable {
+    let id: UUID
+    let title: String
+}
+
 struct ContentView: View {
     private enum PlaylistSortOption: String, CaseIterable, Identifiable {
         case addedOrder = "导入顺序"
@@ -37,7 +51,7 @@ struct ContentView: View {
     @State private var hostWindow: NSWindow?
     @State private var artistOptionsCache = ["全部艺术家"]
     @State private var albumOptionsCache = ["全部专辑"]
-    @State private var filteredPlaylistCache: [(index: Int, track: AudioTrack)] = []
+    @State private var filteredPlaylistCache: [PlaylistListEntry] = []
     @State private var isHistorySheetPresented = false
     @State private var isCreatePlaylistSheetPresented = false
     @State private var newPlaylistName = ""
@@ -48,6 +62,9 @@ struct ContentView: View {
     @State private var immersivePlaylistPreviewHideToken = UUID()
     @State private var isImmersiveMetadataControlsVisible = false
     @State private var suppressLyricAutoScrollAnimation = false
+    @State private var playlistScrollRequestToken = UUID()
+    @State private var playlistScrollTargetPath: String?
+    @State private var playlistScrollAnimated = false
 
     private var theme: PlayerTheme {
         PlayerTheme.forSelection(viewModel.appTheme, colorScheme: colorScheme)
@@ -73,11 +90,11 @@ struct ContentView: View {
 
     private var albumOptions: [String] { albumOptionsCache }
 
-    private var filteredPlaylist: [(index: Int, track: AudioTrack)] { filteredPlaylistCache }
-    private var playlistCopyDestinations: [(id: UUID, title: String)] {
+    private var filteredPlaylist: [PlaylistListEntry] { filteredPlaylistCache }
+    private var playlistCopyDestinations: [PlaylistDestinationOption] {
         viewModel.playlists
             .filter { $0.id != viewModel.selectedPlaylistID }
-            .map { ($0.id, viewModel.displayName(for: $0)) }
+            .map { PlaylistDestinationOption(id: $0.id, title: viewModel.displayName(for: $0)) }
     }
     private var usesImageBackground: Bool { viewModel.appTheme == .customImage && viewModel.customBackgroundImage != nil }
     private var currentLyricsSourceTitle: String {
@@ -192,6 +209,18 @@ struct ContentView: View {
         }
     }
 
+    private var currentTrackPath: String? {
+        viewModel.currentTrack?.url.standardizedFileURL.path
+    }
+
+    private var canLocateCurrentTrack: Bool {
+        currentTrackPath != nil && viewModel.currentPlayingPlaylistID != nil
+    }
+
+    private var playlistThemeKey: String {
+        viewModel.appTheme.rawValue + "|" + (colorScheme == .dark ? "dark" : "light")
+    }
+
     var body: some View {
         Group {
             switch viewModel.interfaceMode {
@@ -222,6 +251,9 @@ struct ContentView: View {
             lyricScrollAnchor = .center
             suppressLyricAutoScrollAnimation = true
             isImmersiveMetadataControlsVisible = false
+            if viewModel.currentPlayingPlaylistID == viewModel.selectedPlaylistID {
+                requestPlaylistLocateToCurrent(animated: true)
+            }
         }
         .onReceive(viewModel.$playlistSearchFocusRequest) { _ in
             isPlaylistSearchFocused = true
@@ -237,12 +269,18 @@ struct ContentView: View {
         .onAppear {
             refreshPlaylistDerivedState()
             resizeWindowIfNeeded(for: viewModel.interfaceMode)
+            if viewModel.currentPlayingPlaylistID == viewModel.selectedPlaylistID {
+                requestPlaylistLocateToCurrent(animated: false)
+            }
         }
         .onChange(of: viewModel.interfaceMode) { newValue in
             if newValue != .immersive {
                 isImmersiveVolumeExpanded = false
                 isImmersivePlaylistPreviewPresented = false
                 isImmersiveMetadataControlsVisible = false
+                if viewModel.currentPlayingPlaylistID == viewModel.selectedPlaylistID {
+                    requestPlaylistLocateToCurrent(animated: false)
+                }
             }
             resizeWindowIfNeeded(for: newValue)
         }
@@ -257,6 +295,9 @@ struct ContentView: View {
             selectedAlbumFilter = allAlbumsLabel
             playlistSearchText = ""
             refreshPlaylistDerivedState()
+            if viewModel.currentPlayingPlaylistID == viewModel.selectedPlaylistID {
+                requestPlaylistLocateToCurrent(animated: false)
+            }
         }
         .onChange(of: viewModel.appLanguage) { _ in
             selectedArtistFilter = allArtistsLabel
@@ -634,7 +675,7 @@ struct ContentView: View {
             } label: {
                 Image(systemName: "backward.fill")
             }
-            .help(tr("上一首", "Previous"))
+            .help(playbackShortcutHelp(for: .previousTrack, "上一首", "Previous"))
             .fixedSize()
 
             Button {
@@ -643,7 +684,7 @@ struct ContentView: View {
                 Label(viewModel.isPlaying ? tr("暂停", "Pause") : tr("播放", "Play"),
                       systemImage: viewModel.isPlaying ? "pause.fill" : "play.fill")
             }
-            .keyboardShortcut(.space, modifiers: [])
+            .help(playbackShortcutHelp(for: .playPause, viewModel.isPlaying ? "暂停" : "播放", viewModel.isPlaying ? "Pause" : "Play"))
             .fixedSize()
 
             Button {
@@ -651,7 +692,7 @@ struct ContentView: View {
             } label: {
                 Image(systemName: "forward.fill")
             }
-            .help(tr("下一首", "Next"))
+            .help(playbackShortcutHelp(for: .nextTrack, "下一首", "Next"))
             .fixedSize()
 
             Button {
@@ -702,19 +743,21 @@ struct ContentView: View {
             } label: {
                 Image(systemName: "backward.fill")
             }
+            .help(playbackShortcutHelp(for: .previousTrack, "上一首", "Previous"))
 
             Button {
                 viewModel.togglePlayback()
             } label: {
                 Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
             }
-            .keyboardShortcut(.space, modifiers: [])
+            .help(playbackShortcutHelp(for: .playPause, viewModel.isPlaying ? "暂停" : "播放", viewModel.isPlaying ? "Pause" : "Play"))
 
             Button {
                 viewModel.playNext()
             } label: {
                 Image(systemName: "forward.fill")
             }
+            .help(playbackShortcutHelp(for: .nextTrack, "下一首", "Next"))
 
             Button {
                 viewModel.cyclePlaybackMode()
@@ -949,37 +992,43 @@ struct ContentView: View {
         }
     }
 
+    private var playlistList: some View {
+        PlaylistListView(
+            items: filteredPlaylist,
+            currentPlaylistID: viewModel.selectedPlaylistID,
+            currentPlayingPlaylistID: viewModel.currentPlayingPlaylistID,
+            currentIndex: viewModel.currentIndex,
+            isPlaying: viewModel.isPlaying,
+            queuedTrackPaths: Set(viewModel.queuedTrackPaths),
+            query: playlistSearchText,
+            theme: theme,
+            themeKey: playlistThemeKey,
+            language: language,
+            playlistDestinations: playlistCopyDestinations,
+            scrollRequestToken: playlistScrollRequestToken,
+            scrollTargetPath: playlistScrollTargetPath,
+            scrollAnimated: playlistScrollAnimated
+        ) { track in
+            viewModel.playSelected(track: track)
+        } queueNextAction: { track in
+            viewModel.queueTrackNext(track, in: viewModel.selectedPlaylistID)
+        } addToNewPlaylistAction: { track in
+            presentCreatePlaylistSheet(adding: track)
+        } addToPlaylistAction: { track, playlistID in
+            viewModel.addTrack(track, to: playlistID)
+        } removeAction: { offsets in
+            removeFilteredTracks(at: offsets)
+        }
+        .equatable()
+    }
+
     private var playlistSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             playlistHeader
             playlistSearchBar
             playlistFilters
 
-            List {
-                ForEach(filteredPlaylist, id: \.track.id) { item in
-                    PlaylistRow(
-                        track: item.track,
-                        isCurrent: viewModel.currentIndex == item.index,
-                        isPlaying: viewModel.isPlaying,
-                        theme: theme,
-                        language: language,
-                        isQueuedNext: viewModel.queuedTrackPaths.contains(item.track.url.standardizedFileURL.path),
-                        query: playlistSearchText,
-                        playlistDestinations: playlistCopyDestinations
-                    ) {
-                        viewModel.playSelected(track: item.track)
-                    } queueNextAction: {
-                        viewModel.queueTrackNext(item.track, in: viewModel.selectedPlaylistID)
-                    } addToNewPlaylistAction: {
-                        presentCreatePlaylistSheet(adding: item.track)
-                    } addToPlaylistAction: { playlistID in
-                        viewModel.addTrack(item.track, to: playlistID)
-                    }
-                }
-                .onDelete(perform: removeFilteredTracks)
-            }
-            .listStyle(.inset)
-            .scrollContentBackground(.hidden)
+            playlistList
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(18)
@@ -1042,31 +1091,7 @@ struct ContentView: View {
             .font(.caption)
             .menuStyle(.borderlessButton)
 
-            List {
-                ForEach(filteredPlaylist, id: \.track.id) { item in
-                    PlaylistRow(
-                        track: item.track,
-                        isCurrent: viewModel.currentIndex == item.index,
-                        isPlaying: viewModel.isPlaying,
-                        theme: theme,
-                        language: language,
-                        isQueuedNext: viewModel.queuedTrackPaths.contains(item.track.url.standardizedFileURL.path),
-                        query: playlistSearchText,
-                        playlistDestinations: playlistCopyDestinations
-                    ) {
-                        viewModel.playSelected(track: item.track)
-                    } queueNextAction: {
-                        viewModel.queueTrackNext(item.track, in: viewModel.selectedPlaylistID)
-                    } addToNewPlaylistAction: {
-                        presentCreatePlaylistSheet(adding: item.track)
-                    } addToPlaylistAction: { playlistID in
-                        viewModel.addTrack(item.track, to: playlistID)
-                    }
-                }
-                .onDelete(perform: removeFilteredTracks)
-            }
-            .listStyle(.inset)
-            .scrollContentBackground(.hidden)
+            playlistList
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(12)
@@ -1083,8 +1108,12 @@ struct ContentView: View {
                     .foregroundStyle(theme.secondaryText)
             }
             Spacer()
-            Text(tr("\(filteredPlaylist.count) / \(viewModel.playlist.count) 首", "\(filteredPlaylist.count) / \(viewModel.playlist.count) tracks"))
-                .foregroundStyle(theme.secondaryText)
+            HStack(spacing: 10) {
+                playlistLocateCurrentButton
+
+                Text(tr("\(filteredPlaylist.count) / \(viewModel.playlist.count) 首", "\(filteredPlaylist.count) / \(viewModel.playlist.count) tracks"))
+                    .foregroundStyle(theme.secondaryText)
+            }
         }
     }
 
@@ -1095,8 +1124,23 @@ struct ContentView: View {
                 .lineLimit(1)
                 .frame(minWidth: 110, alignment: .leading)
 
+            playlistLocateCurrentButton
+
             playlistSearchBarCompact
         }
+    }
+
+    private var playlistLocateCurrentButton: some View {
+        Button {
+            requestPlaylistLocateToCurrent(animated: true, ensureCurrentPlaylistSelected: true, resetFilters: true)
+        } label: {
+            Image(systemName: "scope")
+                .symbolRenderingMode(.monochrome)
+                .foregroundStyle(canLocateCurrentTrack ? theme.accent : theme.secondaryText)
+        }
+        .buttonStyle(.plain)
+        .help(tr("定位到正在播放", "Locate Now Playing"))
+        .disabled(!canLocateCurrentTrack)
     }
 
     private var playlistSwitcher: some View {
@@ -1270,6 +1314,37 @@ struct ContentView: View {
                 .font(.caption2.weight(.bold))
         }
         .foregroundStyle(theme.primaryText)
+    }
+
+    private func requestPlaylistLocateToCurrent(
+        animated: Bool,
+        ensureCurrentPlaylistSelected: Bool = false,
+        resetFilters: Bool = false
+    ) {
+        guard let targetPath = currentTrackPath else { return }
+
+        if ensureCurrentPlaylistSelected {
+            viewModel.selectCurrentPlayingPlaylist()
+        }
+
+        if resetFilters {
+            selectedArtistFilter = allArtistsLabel
+            selectedAlbumFilter = allAlbumsLabel
+            playlistSearchText = ""
+            refreshPlaylistDerivedState()
+        }
+
+        playlistScrollTargetPath = targetPath
+        playlistScrollAnimated = animated
+        playlistScrollRequestToken = UUID()
+    }
+
+    private func playbackShortcutHelp(
+        for action: PlaybackShortcutAction,
+        _ chinese: String,
+        _ english: String
+    ) -> String {
+        tr(chinese, english) + " · " + viewModel.playbackShortcutDisplayText(for: action)
     }
 
     private func compactHeaderIconButton<Label: View>(
@@ -1746,7 +1821,7 @@ struct ContentView: View {
 
                 immersiveTransportButton(
                     systemName: "backward.fill",
-                    helpText: tr("上一首", "Previous"),
+                    helpText: playbackShortcutHelp(for: .previousTrack, "上一首", "Previous"),
                     compact: compact
                 ) {
                     viewModel.playPrevious()
@@ -1754,17 +1829,16 @@ struct ContentView: View {
 
                 immersiveTransportButton(
                     systemName: viewModel.isPlaying ? "pause.fill" : "play.fill",
-                    helpText: viewModel.isPlaying ? tr("暂停", "Pause") : tr("播放", "Play"),
+                    helpText: playbackShortcutHelp(for: .playPause, viewModel.isPlaying ? "暂停" : "播放", viewModel.isPlaying ? "Pause" : "Play"),
                     emphasized: true,
                     compact: compact
                 ) {
                     viewModel.togglePlayback()
                 }
-                .keyboardShortcut(.space, modifiers: [])
 
                 immersiveTransportButton(
                     systemName: "forward.fill",
-                    helpText: tr("下一首", "Next"),
+                    helpText: playbackShortcutHelp(for: .nextTrack, "下一首", "Next"),
                     compact: compact
                 ) {
                     viewModel.playNext()
@@ -2741,17 +2815,17 @@ struct ContentView: View {
         viewModel.removeTracks(at: actualOffsets)
     }
 
-    private func compareByTitle(lhs: (index: Int, track: AudioTrack), rhs: (index: Int, track: AudioTrack)) -> Bool {
+    private func compareByTitle(lhs: PlaylistListEntry, rhs: PlaylistListEntry) -> Bool {
         lhs.track.title.localizedStandardCompare(rhs.track.title) == .orderedAscending
     }
 
-    private func compareByArtist(lhs: (index: Int, track: AudioTrack), rhs: (index: Int, track: AudioTrack)) -> Bool {
+    private func compareByArtist(lhs: PlaylistListEntry, rhs: PlaylistListEntry) -> Bool {
         let left = (lhs.track.artist ?? tr("未知艺术家", "Unknown Artist")) + lhs.track.title
         let right = (rhs.track.artist ?? tr("未知艺术家", "Unknown Artist")) + rhs.track.title
         return left.localizedStandardCompare(right) == .orderedAscending
     }
 
-    private func compareByAlbum(lhs: (index: Int, track: AudioTrack), rhs: (index: Int, track: AudioTrack)) -> Bool {
+    private func compareByAlbum(lhs: PlaylistListEntry, rhs: PlaylistListEntry) -> Bool {
         let left = (lhs.track.album ?? tr("未知专辑", "Unknown Album")) + lhs.track.title
         let right = (rhs.track.album ?? tr("未知专辑", "Unknown Album")) + rhs.track.title
         return left.localizedStandardCompare(right) == .orderedAscending
@@ -2803,7 +2877,7 @@ struct ContentView: View {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
 
-        let filtered = items.compactMap { item -> (Int, AudioTrack)? in
+        let filtered = items.compactMap { item -> PlaylistListEntry? in
             let track = item.element
 
             if selectedArtistFilter != allArtistsLabel, track.artist != selectedArtistFilter {
@@ -2815,7 +2889,7 @@ struct ContentView: View {
             }
 
             guard !query.isEmpty else {
-                return (item.offset, track)
+                return PlaylistListEntry(index: item.offset, track: track)
             }
 
             let haystack = [
@@ -2829,7 +2903,7 @@ struct ContentView: View {
             .joined(separator: " ")
             .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
 
-            return haystack.contains(query) ? (item.offset, track) : nil
+            return haystack.contains(query) ? PlaylistListEntry(index: item.offset, track: track) : nil
         }
 
         filteredPlaylistCache = {
@@ -3246,19 +3320,144 @@ private struct EqualizerBandFader: View {
     }
 }
 
-private struct PlaylistRow: View {
+private struct PlaylistListView: View, @MainActor Equatable {
+    let items: [PlaylistListEntry]
+    let currentPlaylistID: UUID
+    let currentPlayingPlaylistID: UUID?
+    let currentIndex: Int?
+    let isPlaying: Bool
+    let queuedTrackPaths: Set<String>
+    let query: String
+    let theme: PlayerTheme
+    let themeKey: String
+    let language: PlayerViewModel.AppLanguage
+    let playlistDestinations: [PlaylistDestinationOption]
+    let scrollRequestToken: UUID
+    let scrollTargetPath: String?
+    let scrollAnimated: Bool
+    let playAction: (AudioTrack) -> Void
+    let queueNextAction: (AudioTrack) -> Void
+    let addToNewPlaylistAction: (AudioTrack) -> Void
+    let addToPlaylistAction: (AudioTrack, UUID) -> Void
+    let removeAction: (IndexSet) -> Void
+
+    @State private var lastHandledScrollRequestToken: UUID?
+
+    static func == (lhs: PlaylistListView, rhs: PlaylistListView) -> Bool {
+        lhs.items == rhs.items &&
+        lhs.currentPlaylistID == rhs.currentPlaylistID &&
+        lhs.currentPlayingPlaylistID == rhs.currentPlayingPlaylistID &&
+        lhs.currentIndex == rhs.currentIndex &&
+        lhs.isPlaying == rhs.isPlaying &&
+        lhs.queuedTrackPaths == rhs.queuedTrackPaths &&
+        lhs.query == rhs.query &&
+        lhs.themeKey == rhs.themeKey &&
+        lhs.language == rhs.language &&
+        lhs.playlistDestinations == rhs.playlistDestinations &&
+        lhs.scrollRequestToken == rhs.scrollRequestToken &&
+        lhs.scrollTargetPath == rhs.scrollTargetPath &&
+        lhs.scrollAnimated == rhs.scrollAnimated
+    }
+
+    private var itemIDs: [String] {
+        items.map(\.id)
+    }
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            List {
+                ForEach(items) { item in
+                    PlaylistRow(
+                        track: item.track,
+                        isCurrent: currentPlayingPlaylistID == currentPlaylistID && currentIndex == item.index,
+                        isPlaying: isPlaying,
+                        theme: theme,
+                        themeKey: themeKey,
+                        language: language,
+                        isQueuedNext: queuedTrackPaths.contains(item.id),
+                        query: query,
+                        playlistDestinations: playlistDestinations
+                    ) {
+                        playAction(item.track)
+                    } queueNextAction: {
+                        queueNextAction(item.track)
+                    } addToNewPlaylistAction: {
+                        addToNewPlaylistAction(item.track)
+                    } addToPlaylistAction: { playlistID in
+                        addToPlaylistAction(item.track, playlistID)
+                    }
+                    .equatable()
+                    .id(item.id)
+                }
+                .onDelete(perform: removeAction)
+            }
+            .listStyle(.inset)
+            .scrollContentBackground(.hidden)
+            .onAppear {
+                scrollToCurrentIfNeeded(using: proxy)
+            }
+            .onChange(of: scrollRequestToken) { _ in
+                scrollToCurrentIfNeeded(using: proxy)
+            }
+            .onChange(of: itemIDs) { _ in
+                scrollToCurrentIfNeeded(using: proxy)
+            }
+        }
+    }
+
+    private func scrollToCurrentIfNeeded(using proxy: ScrollViewProxy) {
+        guard let targetPath = scrollTargetPath else { return }
+        guard lastHandledScrollRequestToken != scrollRequestToken else { return }
+        guard itemIDs.contains(targetPath) else { return }
+
+        let animated = scrollAnimated
+        DispatchQueue.main.async {
+            let scrollAction = {
+                proxy.scrollTo(targetPath, anchor: .center)
+            }
+
+            if animated {
+                withAnimation(.easeInOut(duration: 0.22)) {
+                    scrollAction()
+                }
+            } else {
+                var transaction = Transaction()
+                transaction.animation = nil
+                withTransaction(transaction) {
+                    scrollAction()
+                }
+            }
+        }
+
+        lastHandledScrollRequestToken = scrollRequestToken
+    }
+}
+
+private struct PlaylistRow: View, @MainActor Equatable {
     let track: AudioTrack
     let isCurrent: Bool
     let isPlaying: Bool
     let theme: PlayerTheme
+    let themeKey: String
     let language: PlayerViewModel.AppLanguage
     let isQueuedNext: Bool
     let query: String
-    let playlistDestinations: [(id: UUID, title: String)]
+    let playlistDestinations: [PlaylistDestinationOption]
     let action: () -> Void
     let queueNextAction: () -> Void
     let addToNewPlaylistAction: () -> Void
     let addToPlaylistAction: (UUID) -> Void
+
+    static func == (lhs: PlaylistRow, rhs: PlaylistRow) -> Bool {
+        lhs.track == rhs.track &&
+        lhs.isCurrent == rhs.isCurrent &&
+        lhs.isPlaying == rhs.isPlaying &&
+        lhs.themeKey == rhs.themeKey &&
+        lhs.language == rhs.language &&
+        lhs.isQueuedNext == rhs.isQueuedNext &&
+        lhs.query == rhs.query &&
+        lhs.playlistDestinations == rhs.playlistDestinations
+    }
 
     var body: some View {
         Button(action: action) {

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 private struct DefaultMenuCleanupCommands: Commands {
@@ -18,6 +19,8 @@ private struct DefaultMenuCleanupCommands: Commands {
 struct MusicPlayerApp: App {
     @StateObject private var viewModel = PlayerViewModel()
     @State private var desktopLyricsController: DesktopLyricsWindowController?
+    @State private var playbackShortcutMonitor: PlaybackShortcutMonitor?
+    @StateObject private var appMenuLocalizer = AppMenuLocalizer()
 
     private var language: PlayerViewModel.AppLanguage {
         viewModel.appLanguage
@@ -32,6 +35,12 @@ struct MusicPlayerApp: App {
                         controller.setVisible(viewModel.isDesktopLyricsVisible)
                         desktopLyricsController = controller
                     }
+                    if playbackShortcutMonitor == nil {
+                        let monitor = PlaybackShortcutMonitor(viewModel: viewModel)
+                        monitor.start()
+                        playbackShortcutMonitor = monitor
+                    }
+                    appMenuLocalizer.apply(language: viewModel.appLanguage)
                 }
                 .onChange(of: viewModel.isDesktopLyricsVisible) { isVisible in
                     desktopLyricsController?.setVisible(isVisible)
@@ -61,6 +70,7 @@ struct MusicPlayerApp: App {
                     desktopLyricsController?.refreshLayout(reposition: viewModel.isDesktopLyricsVisible)
                 }
                 .onChange(of: viewModel.appLanguage) { _ in
+                    appMenuLocalizer.apply(language: viewModel.appLanguage)
                     desktopLyricsController?.refreshLayout()
                 }
         }
@@ -148,10 +158,12 @@ struct MusicPlayerApp: App {
 
         Settings {
             AppSettingsView(viewModel: viewModel)
+                .navigationTitle(language.pick("设置", "Settings"))
         }
 
         .commands {
             DefaultMenuCleanupCommands()
+
             CommandGroup(after: .newItem) {
                 Button(language.pick("添加音频文件", "Add Audio Files")) {
                     viewModel.openFiles()
@@ -413,8 +425,315 @@ private struct AppSettingsView: View {
             } header: {
                 Text(language.pick("语言", "Language"))
             }
+
+            Section {
+                ForEach(PlaybackShortcutAction.allCases) { action in
+                    PlaybackShortcutRecorderRow(viewModel: viewModel, action: action)
+                }
+
+                HStack {
+                    Spacer()
+
+                    Button(language.pick("恢复默认快捷键", "Restore Default Shortcuts")) {
+                        viewModel.resetAllPlaybackShortcuts()
+                    }
+                }
+
+                Text(language.pick(
+                    "默认使用 Mac 键盘媒体键 F7 / F8 / F9。录制普通键盘快捷键时，至少包含一个修饰键；F1-F20 可单独录制。",
+                    "Defaults use the Mac media keys F7 / F8 / F9. Custom keyboard shortcuts must include at least one modifier key, unless you record F1-F20 by themselves."
+                ))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                if let status = viewModel.playbackShortcutRecorderStatusText {
+                    Text(status)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            } header: {
+                Text(language.pick("播放快捷键", "Playback Shortcuts"))
+            }
         }
         .padding(20)
-        .frame(width: 420)
+        .frame(width: 560)
+        .onDisappear {
+            viewModel.cancelRecordingPlaybackShortcut()
+        }
+    }
+}
+
+private struct PlaybackShortcutRecorderRow: View {
+    @ObservedObject var viewModel: PlayerViewModel
+    let action: PlaybackShortcutAction
+
+    private var language: PlayerViewModel.AppLanguage {
+        viewModel.appLanguage
+    }
+
+    private var isRecording: Bool {
+        viewModel.recordingPlaybackShortcutAction == action
+    }
+
+    private var shortcutText: String {
+        if isRecording {
+            return language.pick("按下快捷键…", "Press shortcut...")
+        }
+        return viewModel.playbackShortcutDisplayText(for: action)
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Text(action.title(in: language))
+
+            Spacer()
+
+            Group {
+                if isRecording {
+                    Button(shortcutText) {
+                        viewModel.cancelRecordingPlaybackShortcut()
+                    }
+                    .buttonStyle(.borderedProminent)
+                } else {
+                    Button(shortcutText) {
+                        viewModel.beginRecordingPlaybackShortcut(for: action)
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+            .font(.system(.body, design: .monospaced))
+            .frame(minWidth: 170)
+
+            Button(language.pick("恢复默认", "Reset")) {
+                viewModel.resetPlaybackShortcut(action)
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+}
+
+@MainActor
+private final class AppMenuLocalizer: NSObject, ObservableObject {
+    private var language: PlayerViewModel.AppLanguage = .chinese
+
+    override init() {
+        super.init()
+        let center = NotificationCenter.default
+        center.addObserver(
+            self,
+            selector: #selector(handleMenuContextChange(_:)),
+            name: NSApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        center.addObserver(
+            self,
+            selector: #selector(handleMenuContextChange(_:)),
+            name: NSWindow.didBecomeKeyNotification,
+            object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    func apply(language: PlayerViewModel.AppLanguage) {
+        self.language = language
+        applyCurrentLanguage()
+    }
+
+    @objc private func handleMenuContextChange(_ notification: Notification) {
+        applyCurrentLanguage()
+    }
+
+    private func applyCurrentLanguage() {
+        guard let mainMenu = NSApp.mainMenu else { return }
+        let appName = applicationName
+
+        if let appMenu = mainMenu.items.first?.submenu {
+            localize(menu: appMenu, appName: appName)
+        }
+
+        for item in mainMenu.items.dropFirst() {
+            guard let standardMenu = StandardMenu(title: item.title) else { continue }
+            item.title = standardMenu.title(in: language)
+
+            if let submenu = item.submenu {
+                localize(menu: submenu, appName: appName)
+            }
+        }
+    }
+
+    private func localize(menu: NSMenu, appName: String) {
+        for item in menu.items {
+            if let translatedTitle = translatedTitle(for: item.title, appName: appName) {
+                item.title = translatedTitle
+            }
+
+            if let submenu = item.submenu {
+                localize(menu: submenu, appName: appName)
+            }
+        }
+    }
+
+    private func translatedTitle(for title: String, appName: String) -> String? {
+        let normalizedTitle = normalized(title)
+
+        switch normalizedTitle {
+        case "File", "文件":
+            return language.pick("文件", "File")
+        case "Edit", "编辑":
+            return language.pick("编辑", "Edit")
+        case "View", "视图":
+            return language.pick("视图", "View")
+        case "Format", "格式":
+            return language.pick("格式", "Format")
+        case "Window", "窗口":
+            return language.pick("窗口", "Window")
+        case "Help", "帮助":
+            return language.pick("帮助", "Help")
+        case "Services", "服务":
+            return language.pick("服务", "Services")
+        case "Settings…", "Setting", "Settings", "Preferences…", "Preferences...", "设置…", "设置":
+            return language.pick("设置…", "Settings…")
+        case "Hide Others", "隐藏其他":
+            return language.pick("隐藏其他", "Hide Others")
+        case "Show All", "全部显示":
+            return language.pick("全部显示", "Show All")
+        case "Close", "关闭":
+            return language.pick("关闭", "Close")
+        case "Close Window", "关闭窗口":
+            return language.pick("关闭窗口", "Close Window")
+        case "Minimize", "最小化":
+            return language.pick("最小化", "Minimize")
+        case "Zoom", "缩放":
+            return language.pick("缩放", "Zoom")
+        case "Bring All to Front", "前置全部窗口":
+            return language.pick("前置全部窗口", "Bring All to Front")
+        case "Enter Full Screen", "进入全屏":
+            return language.pick("进入全屏", "Enter Full Screen")
+        case "Exit Full Screen", "退出全屏":
+            return language.pick("退出全屏", "Exit Full Screen")
+        case "Show Toolbar", "显示工具栏":
+            return language.pick("显示工具栏", "Show Toolbar")
+        case "Hide Toolbar", "隐藏工具栏":
+            return language.pick("隐藏工具栏", "Hide Toolbar")
+        case "Customize Toolbar…", "Customize Toolbar...", "自定工具栏…", "自定义工具栏…":
+            return language.pick("自定义工具栏…", "Customize Toolbar…")
+        case "Show Sidebar", "显示边栏":
+            return language.pick("显示边栏", "Show Sidebar")
+        case "Hide Sidebar", "隐藏边栏":
+            return language.pick("隐藏边栏", "Hide Sidebar")
+        case "Show Tab Bar", "显示标签栏":
+            return language.pick("显示标签栏", "Show Tab Bar")
+        case "Hide Tab Bar", "隐藏标签栏":
+            return language.pick("隐藏标签栏", "Hide Tab Bar")
+        case "Show Colors", "显示颜色":
+            return language.pick("显示颜色", "Show Colors")
+        case "Show Fonts", "显示字体":
+            return language.pick("显示字体", "Show Fonts")
+        case "Font", "字体":
+            return language.pick("字体", "Font")
+        case "Bold", "粗体":
+            return language.pick("粗体", "Bold")
+        case "Italic", "斜体":
+            return language.pick("斜体", "Italic")
+        case "Underline", "下划线":
+            return language.pick("下划线", "Underline")
+        case "Bigger", "放大":
+            return language.pick("放大", "Bigger")
+        case "Smaller", "缩小":
+            return language.pick("缩小", "Smaller")
+        case "Copy Style", "拷贝样式":
+            return language.pick("拷贝样式", "Copy Style")
+        case "Paste Style", "粘贴样式":
+            return language.pick("粘贴样式", "Paste Style")
+        case "Align", "对齐":
+            return language.pick("对齐", "Align")
+        case "Left", "左对齐":
+            return language.pick("左对齐", "Left")
+        case "Center", "居中":
+            return language.pick("居中", "Center")
+        case "Right", "右对齐":
+            return language.pick("右对齐", "Right")
+        case "Justify", "两端对齐":
+            return language.pick("两端对齐", "Justify")
+        default:
+            if normalizedTitle == "About \(appName)" || normalizedTitle == "关于 \(appName)" || normalizedTitle == "关于\(appName)" {
+                return language.pick("关于 \(appName)", "About \(appName)")
+            }
+
+            if normalizedTitle == "Hide \(appName)" || normalizedTitle == "隐藏 \(appName)" || normalizedTitle == "隐藏\(appName)" {
+                return language.pick("隐藏 \(appName)", "Hide \(appName)")
+            }
+
+            if normalizedTitle == "Quit \(appName)" || normalizedTitle == "退出 \(appName)" || normalizedTitle == "退出\(appName)" {
+                return language.pick("退出 \(appName)", "Quit \(appName)")
+            }
+
+            if normalizedTitle == "\(appName) Help" || normalizedTitle == "\(appName) 帮助" {
+                return language.pick("\(appName) 帮助", "\(appName) Help")
+            }
+
+            return nil
+        }
+    }
+
+    private func normalized(_ title: String) -> String {
+        title
+            .replacingOccurrences(of: "...", with: "…")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var applicationName: String {
+        let bundle = Bundle.main
+        return (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (bundle.object(forInfoDictionaryKey: kCFBundleNameKey as String) as? String)
+            ?? "Zephyr Player"
+    }
+}
+
+private enum StandardMenu {
+    case file
+    case edit
+    case view
+    case format
+    case window
+    case help
+
+    init?(title: String) {
+        switch title {
+        case "File", "文件":
+            self = .file
+        case "Edit", "编辑":
+            self = .edit
+        case "View", "视图":
+            self = .view
+        case "Format", "格式":
+            self = .format
+        case "Window", "窗口":
+            self = .window
+        case "Help", "帮助":
+            self = .help
+        default:
+            return nil
+        }
+    }
+
+    func title(in language: PlayerViewModel.AppLanguage) -> String {
+        switch self {
+        case .file:
+            return language.pick("文件", "File")
+        case .edit:
+            return language.pick("编辑", "Edit")
+        case .view:
+            return language.pick("视图", "View")
+        case .format:
+            return language.pick("格式", "Format")
+        case .window:
+            return language.pick("窗口", "Window")
+        case .help:
+            return language.pick("帮助", "Help")
+        }
     }
 }

@@ -86,6 +86,7 @@ private struct PersistedAppState: Codable {
     let playlists: [PersistedPlaylistCollection]
     let selectedPlaylistID: UUID
     let appLanguage: String?
+    let playbackShortcuts: PlaybackShortcutConfiguration?
     let playbackMode: String
     let interfaceMode: String
     let lastStandardInterfaceMode: String?
@@ -344,6 +345,9 @@ final class PlayerViewModel: NSObject, ObservableObject {
         }
     }
     @Published var appLanguage: AppLanguage = .chinese
+    @Published var playbackShortcuts: PlaybackShortcutConfiguration = .defaultValue
+    @Published var recordingPlaybackShortcutAction: PlaybackShortcutAction?
+    @Published var playbackShortcutRecorderStatusText: String?
     @Published var playlistSearchFocusRequest = 0
     @Published var listeningHistoryPresentationRequest = 0
     @Published var appTheme: AppTheme = .system
@@ -1144,6 +1148,60 @@ final class PlayerViewModel: NSObject, ObservableObject {
         selectedPlaylistID = id
     }
 
+    func selectCurrentPlayingPlaylist() {
+        guard let currentPlayingPlaylistID else { return }
+        selectPlaylist(currentPlayingPlaylistID)
+    }
+
+    func isCurrentTrack(at index: Int, in playlistID: UUID) -> Bool {
+        currentPlayingPlaylistID == playlistID && currentIndex == index
+    }
+
+    func playbackShortcutDisplayText(for action: PlaybackShortcutAction) -> String {
+        playbackShortcuts[action].displayText(in: appLanguage)
+    }
+
+    func beginRecordingPlaybackShortcut(for action: PlaybackShortcutAction) {
+        recordingPlaybackShortcutAction = action
+        playbackShortcutRecorderStatusText = nil
+    }
+
+    func cancelRecordingPlaybackShortcut() {
+        recordingPlaybackShortcutAction = nil
+        playbackShortcutRecorderStatusText = nil
+    }
+
+    func resetPlaybackShortcut(_ action: PlaybackShortcutAction) {
+        playbackShortcuts[action] = PlaybackShortcutConfiguration.defaultValue[action]
+        playbackShortcutRecorderStatusText = nil
+    }
+
+    func resetAllPlaybackShortcuts() {
+        playbackShortcuts = .defaultValue
+        playbackShortcutRecorderStatusText = nil
+    }
+
+    nonisolated func handlePlaybackShortcutEvent(_ event: NSEvent) -> Bool {
+        guard let shortcutEvent = PlaybackShortcutEventSnapshot(event) else {
+            return false
+        }
+
+        return MainActor.assumeIsolated {
+            if let action = recordingPlaybackShortcutAction {
+                return handlePlaybackShortcutCapture(shortcutEvent, for: action)
+            }
+
+            guard let matchedAction = PlaybackShortcutAction.allCases.first(where: {
+                playbackShortcuts[$0].matches(shortcutEvent)
+            }) else {
+                return false
+            }
+
+            performPlaybackShortcutAction(matchedAction)
+            return true
+        }
+    }
+
     func removeSelectedPlaylist() {
         removePlaylist(id: selectedPlaylistID)
     }
@@ -1254,6 +1312,54 @@ final class PlayerViewModel: NSObject, ObservableObject {
             resumePlayback()
         } else if !playlist.isEmpty {
             playTrack(at: currentIndex ?? 0, in: selectedPlaylistID)
+        }
+    }
+
+    private func handlePlaybackShortcutCapture(_ event: PlaybackShortcutEventSnapshot, for action: PlaybackShortcutAction) -> Bool {
+        guard let result = PlaybackShortcut.fromCaptureEvent(event) else {
+            return false
+        }
+
+        switch result {
+        case let .captured(shortcut):
+            applyPlaybackShortcut(shortcut, for: action)
+            recordingPlaybackShortcutAction = nil
+            playbackShortcutRecorderStatusText = nil
+        case .cancelled:
+            recordingPlaybackShortcutAction = nil
+            playbackShortcutRecorderStatusText = nil
+        case .rejected:
+            playbackShortcutRecorderStatusText = appLanguage.pick(
+                "自定义键盘快捷键至少需要包含 Command、Option、Control、Shift 或 fn；也可以单独使用 F1-F20。",
+                "Custom keyboard shortcuts must include Command, Option, Control, Shift, or fn, unless you use F1-F20 by themselves."
+            )
+        }
+
+        return true
+    }
+
+    private func applyPlaybackShortcut(_ shortcut: PlaybackShortcut, for action: PlaybackShortcutAction) {
+        var updatedShortcuts = playbackShortcuts
+        let previousShortcut = updatedShortcuts[action]
+
+        if let duplicatedAction = PlaybackShortcutAction.allCases.first(where: {
+            $0 != action && updatedShortcuts[$0] == shortcut
+        }) {
+            updatedShortcuts[duplicatedAction] = previousShortcut
+        }
+
+        updatedShortcuts[action] = shortcut
+        playbackShortcuts = updatedShortcuts
+    }
+
+    private func performPlaybackShortcutAction(_ action: PlaybackShortcutAction) {
+        switch action {
+        case .previousTrack:
+            playPrevious()
+        case .playPause:
+            togglePlayback()
+        case .nextTrack:
+            playNext()
         }
     }
 
@@ -1857,6 +1963,14 @@ final class PlayerViewModel: NSObject, ObservableObject {
             }
             .store(in: &cancellables)
 
+        $playbackShortcuts
+            .dropFirst()
+            .debounce(for: .milliseconds(150), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.persistAppState()
+            }
+            .store(in: &cancellables)
+
         Publishers.CombineLatest4($volume, $isDesktopLyricsVisible, $desktopLyricsFontSize, $desktopLyricsOpacity)
             .dropFirst()
             .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
@@ -1953,6 +2067,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
         }
 
         appLanguage = AppLanguage(rawValue: persisted.appLanguage ?? AppLanguage.chinese.rawValue) ?? .chinese
+        playbackShortcuts = persisted.playbackShortcuts ?? .defaultValue
         playbackMode = PlaybackMode(rawValue: persisted.playbackMode) ?? .sequential
         if let persistedLastMode = persisted.lastStandardInterfaceMode,
            let resolvedMode = InterfaceMode(rawValue: persistedLastMode),
@@ -2053,6 +2168,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
             playlists: playlists.map(PersistedPlaylistCollection.init),
             selectedPlaylistID: resolvedSelectedPlaylistID,
             appLanguage: appLanguage.rawValue,
+            playbackShortcuts: playbackShortcuts,
             playbackMode: playbackMode.rawValue,
             interfaceMode: interfaceMode.rawValue,
             lastStandardInterfaceMode: lastStandardInterfaceMode.rawValue,

@@ -19,6 +19,7 @@
 		A0000000000000000000002A /* DesktopLyricsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001B /* DesktopLyricsWindowController.swift */; };
 		A0000000000000000000002B /* AppLanguageSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001C /* AppLanguageSupport.swift */; };
 		A0000000000000000000002C /* ArtworkModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001D /* ArtworkModels.swift */; };
+		A0000000000000000000002D /* PlaybackShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001E /* PlaybackShortcuts.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -36,6 +37,7 @@
 		A0000000000000000000001B /* DesktopLyricsWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopLyricsWindowController.swift; sourceTree = "<group>"; };
 		A0000000000000000000001C /* AppLanguageSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLanguageSupport.swift; sourceTree = "<group>"; };
 		A0000000000000000000001D /* ArtworkModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtworkModels.swift; sourceTree = "<group>"; };
+		A0000000000000000000001E /* PlaybackShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackShortcuts.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -120,6 +122,7 @@
 				A00000000000000000000016 /* LyricsParser.swift */,
 				A00000000000000000000013 /* MusicPlayerApp.swift */,
 				A00000000000000000000019 /* OnlineMetadataService.swift */,
+				A0000000000000000000001E /* PlaybackShortcuts.swift */,
 				A00000000000000000000017 /* PlayerTheme.swift */,
 				A00000000000000000000014 /* PlayerViewModel.swift */,
 			);
@@ -203,6 +206,7 @@
 				A00000000000000000000025 /* LyricsParser.swift in Sources */,
 				A00000000000000000000023 /* MusicPlayerApp.swift in Sources */,
 				A00000000000000000000028 /* OnlineMetadataService.swift in Sources */,
+				A0000000000000000000002D /* PlaybackShortcuts.swift in Sources */,
 				A00000000000000000000026 /* PlayerTheme.swift in Sources */,
 				A00000000000000000000024 /* PlayerViewModel.swift in Sources */,
 			);
