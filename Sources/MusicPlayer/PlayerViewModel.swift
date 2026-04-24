@@ -1,4 +1,5 @@
 import AppKit
+import Accelerate
 @preconcurrency import AVFoundation
 @preconcurrency import Combine
 import Foundation
@@ -132,6 +133,117 @@ private struct ExportedUserDataPackage: Codable {
     let listeningHistory: [ListeningHistoryRecord]
     let securityScopedBookmarks: [PersistedSecurityScopedBookmark]
     let backgroundAsset: ExportedBackgroundAsset?
+}
+
+private final class AudioSpectrumAnalyzer: @unchecked Sendable {
+    let bandCount: Int
+    let fftSize: Int
+
+    private let log2FFTSize: vDSP_Length
+    private let fftSetup: FFTSetup?
+    private let window: [Float]
+
+    init(bandCount: Int, fftSize: Int = 1_024) {
+        self.bandCount = bandCount
+        self.fftSize = fftSize
+        log2FFTSize = vDSP_Length(log2(Float(fftSize)))
+        fftSetup = vDSP_create_fftsetup(log2FFTSize, FFTRadix(kFFTRadix2))
+
+        var window = [Float](repeating: 0, count: fftSize)
+        vDSP_hann_window(&window, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
+        self.window = window
+    }
+
+    deinit {
+        if let fftSetup {
+            vDSP_destroy_fftsetup(fftSetup)
+        }
+    }
+
+    func spectrumLevels(from buffer: AVAudioPCMBuffer) -> [CGFloat] {
+        guard let fftSetup,
+              let channelData = buffer.floatChannelData,
+              buffer.frameLength > 0 else {
+            return Self.idleLevels(count: bandCount)
+        }
+
+        let frameCount = min(Int(buffer.frameLength), fftSize)
+        let channelCount = max(Int(buffer.format.channelCount), 1)
+        var samples = [Float](repeating: 0, count: fftSize)
+
+        for channel in 0..<channelCount {
+            let source = channelData[channel]
+            vDSP_vadd(samples, 1, source, 1, &samples, 1, vDSP_Length(frameCount))
+        }
+
+        if channelCount > 1 {
+            var divisor = Float(channelCount)
+            vDSP_vsdiv(samples, 1, &divisor, &samples, 1, vDSP_Length(frameCount))
+        }
+
+        vDSP_vmul(samples, 1, window, 1, &samples, 1, vDSP_Length(fftSize))
+
+        var real = [Float](repeating: 0, count: fftSize / 2)
+        var imaginary = [Float](repeating: 0, count: fftSize / 2)
+        var magnitudes = [Float](repeating: 0, count: fftSize / 2)
+
+        real.withUnsafeMutableBufferPointer { realPointer in
+            imaginary.withUnsafeMutableBufferPointer { imaginaryPointer in
+                guard let realBase = realPointer.baseAddress,
+                      let imaginaryBase = imaginaryPointer.baseAddress else { return }
+
+                var splitComplex = DSPSplitComplex(realp: realBase, imagp: imaginaryBase)
+                samples.withUnsafeBufferPointer { samplePointer in
+                    samplePointer.baseAddress?.withMemoryRebound(to: DSPComplex.self, capacity: fftSize / 2) { complexPointer in
+                        vDSP_ctoz(complexPointer, 2, &splitComplex, 1, vDSP_Length(fftSize / 2))
+                    }
+                }
+
+                vDSP_fft_zrip(fftSetup, &splitComplex, 1, log2FFTSize, FFTDirection(FFT_FORWARD))
+                vDSP_zvmags(&splitComplex, 1, &magnitudes, 1, vDSP_Length(fftSize / 2))
+            }
+        }
+
+        var scale = 1.0 / Float(fftSize * fftSize)
+        vDSP_vsmul(magnitudes, 1, &scale, &magnitudes, 1, vDSP_Length(magnitudes.count))
+
+        return groupedLogarithmicLevels(from: magnitudes, sampleRate: Float(buffer.format.sampleRate))
+    }
+
+    private func groupedLogarithmicLevels(from magnitudes: [Float], sampleRate: Float) -> [CGFloat] {
+        guard !magnitudes.isEmpty, sampleRate > 0 else {
+            return Self.idleLevels(count: bandCount)
+        }
+
+        let nyquist = sampleRate / 2
+        let minimumFrequency: Float = 32
+        let maximumFrequency = min(nyquist, 18_000)
+        let ratio = maximumFrequency / minimumFrequency
+
+        return (0..<bandCount).map { band in
+            let lowerFraction = Float(band) / Float(bandCount)
+            let upperFraction = Float(band + 1) / Float(bandCount)
+            let lowerFrequency = minimumFrequency * pow(ratio, lowerFraction)
+            let upperFrequency = minimumFrequency * pow(ratio, upperFraction)
+            let lowerIndex = max(1, Int((lowerFrequency / sampleRate) * Float(fftSize)))
+            let upperIndex = min(max(lowerIndex + 1, Int((upperFrequency / sampleRate) * Float(fftSize))), magnitudes.count)
+
+            var peak: Float = 0
+            if lowerIndex < upperIndex {
+                magnitudes[lowerIndex..<upperIndex].withContiguousStorageIfAvailable { storage in
+                    vDSP_maxv(storage.baseAddress!, 1, &peak, vDSP_Length(storage.count))
+                }
+            }
+
+            let decibels = 10 * log10(max(peak, 1.0e-10))
+            let normalized = min(max((decibels + 72) / 72, 0), 1)
+            return CGFloat(max(pow(normalized, 0.62), 0.035))
+        }
+    }
+
+    private static func idleLevels(count: Int) -> [CGFloat] {
+        Array(repeating: 0.035, count: count)
+    }
 }
 
 struct ListeningHistoryRecord: Codable, Identifiable {
@@ -329,6 +441,8 @@ final class PlayerViewModel: NSObject, ObservableObject {
     @Published private(set) var batchScrapeCompletedCount = 0
     @Published private(set) var batchScrapeTargetCount = 0
     @Published var isDropTargeted = false
+    @Published var isMiniPlayerVisible = false
+    @Published private(set) var audioSpectrumLevels = PlayerViewModel.idleSpectrumLevels
     @Published var isDesktopLyricsVisible = false
     @Published var isDesktopLyricsSettingsPresented = false
     @Published var desktopLyricsFontSize: Double = 28
@@ -395,10 +509,13 @@ final class PlayerViewModel: NSObject, ObservableObject {
     private var securityScopedBookmarks: [String: Data] = [:]
     private var activeSecurityScopedURLs: [String: URL] = [:]
     private var lastStandardInterfaceMode: InterfaceMode = .compact
+    private let spectrumAnalyzer = AudioSpectrumAnalyzer(bandCount: PlayerViewModel.spectrumBandCount)
 
     private static let appStateDefaultsKey = "ZephyrPlayer.AppState"
     private static let listeningHistoryDefaultsKey = "ZephyrPlayer.ListeningHistory"
     private static let securityScopedBookmarksDefaultsKey = "ZephyrPlayer.SecurityScopedBookmarks"
+    private static let spectrumBandCount = 24
+    private static let idleSpectrumLevels = Array(repeating: CGFloat(0.035), count: spectrumBandCount)
 
     override init() {
         let defaultPlaylist = PlaylistCollection(name: Self.defaultPlaylistName)
@@ -562,6 +679,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
 
     deinit {
         timerCancellable?.cancel()
+        equalizerNode.removeTap(onBus: 0)
         audioEngine.stop()
         activeSecurityScopedURLs.values.forEach { $0.stopAccessingSecurityScopedResource() }
     }
@@ -1315,6 +1433,10 @@ final class PlayerViewModel: NSObject, ObservableObject {
         }
     }
 
+    func toggleMiniPlayer() {
+        isMiniPlayerVisible.toggle()
+    }
+
     private func handlePlaybackShortcutCapture(_ event: PlaybackShortcutEventSnapshot, for action: PlaybackShortcutAction) -> Bool {
         guard let result = PlaybackShortcut.fromCaptureEvent(event) else {
             return false
@@ -1508,6 +1630,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
             didAttemptOnlineArtworkSearch = false
             onlineArtworkResultCount = 0
             currentArtwork = nil
+            resetAudioSpectrum()
             let clampedTime = min(max(startTime, 0), duration)
             let startFrame = AVAudioFramePosition(clampedTime * currentSampleRate)
             currentFramePosition = min(max(startFrame, 0), audioFile.length)
@@ -1530,6 +1653,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
         invalidateScheduledCompletion()
         playerNode.stop()
         isPlaying = false
+        resetAudioSpectrum()
     }
 
     private func resumePlayback() {
@@ -1565,6 +1689,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
         didAttemptOnlineArtworkSearch = false
         onlineArtworkResultCount = 0
         currentArtwork = nil
+        resetAudioSpectrum()
         supplementalAssetTask?.cancel()
         supplementalAssetTask = nil
         if clearSelection {
@@ -1602,6 +1727,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
         audioEngine.connect(playerNode, to: timePitchNode, format: nil)
         audioEngine.connect(timePitchNode, to: equalizerNode, format: nil)
         audioEngine.connect(equalizerNode, to: audioEngine.mainMixerNode, format: nil)
+        installSpectrumTap()
 
         let frequencies: [Float] = [31, 62, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
         let labels = ["31", "62", "125", "250", "500", "1K", "2K", "4K", "8K", "16K"]
@@ -1657,6 +1783,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
 
         guard remainingFrames > 0 else {
             isPlaying = false
+            resetAudioSpectrum()
             return
         }
 
@@ -1675,6 +1802,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
                 self.currentFramePosition = audioFile.length
                 self.currentTime = self.duration
                 self.isPlaying = false
+                self.resetAudioSpectrum()
                 self.handlePlaybackCompletion(successfully: true)
             }
         }
@@ -1694,7 +1822,23 @@ final class PlayerViewModel: NSObject, ObservableObject {
             isPlaying = true
         } else {
             isPlaying = false
+            resetAudioSpectrum()
         }
+    }
+
+    private func installSpectrumTap() {
+        let analyzer = spectrumAnalyzer
+        equalizerNode.installTap(onBus: 0, bufferSize: AVAudioFrameCount(analyzer.fftSize), format: nil) { [weak self] buffer, _ in
+            let levels = analyzer.spectrumLevels(from: buffer)
+            Task { @MainActor [weak self] in
+                guard let self, self.isPlaying else { return }
+                self.audioSpectrumLevels = levels
+            }
+        }
+    }
+
+    private func resetAudioSpectrum() {
+        audioSpectrumLevels = Self.idleSpectrumLevels
     }
 
     private func invalidateScheduledCompletion() {

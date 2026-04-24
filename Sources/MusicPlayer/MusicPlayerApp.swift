@@ -19,6 +19,7 @@ private struct DefaultMenuCleanupCommands: Commands {
 struct MusicPlayerApp: App {
     @StateObject private var viewModel = PlayerViewModel()
     @State private var desktopLyricsController: DesktopLyricsWindowController?
+    @State private var miniPlayerController: MiniPlayerWindowController?
     @State private var playbackShortcutMonitor: PlaybackShortcutMonitor?
     @StateObject private var appMenuLocalizer = AppMenuLocalizer()
 
@@ -35,6 +36,11 @@ struct MusicPlayerApp: App {
                         controller.setVisible(viewModel.isDesktopLyricsVisible)
                         desktopLyricsController = controller
                     }
+                    if miniPlayerController == nil {
+                        let controller = MiniPlayerWindowController(viewModel: viewModel)
+                        controller.setVisible(viewModel.isMiniPlayerVisible)
+                        miniPlayerController = controller
+                    }
                     if playbackShortcutMonitor == nil {
                         let monitor = PlaybackShortcutMonitor(viewModel: viewModel)
                         monitor.start()
@@ -44,6 +50,9 @@ struct MusicPlayerApp: App {
                 }
                 .onChange(of: viewModel.isDesktopLyricsVisible) { isVisible in
                     desktopLyricsController?.setVisible(isVisible)
+                }
+                .onChange(of: viewModel.isMiniPlayerVisible) { isVisible in
+                    miniPlayerController?.setVisible(isVisible)
                 }
                 .onChange(of: viewModel.isDesktopLyricsSettingsPresented) { _ in
                     desktopLyricsController?.refreshLayout()

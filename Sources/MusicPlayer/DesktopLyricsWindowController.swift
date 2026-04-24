@@ -167,6 +167,79 @@ final class DesktopLyricsWindowController: NSObject, NSWindowDelegate {
     }
 }
 
+@MainActor
+final class MiniPlayerWindowController: NSObject, NSWindowDelegate {
+    private weak var viewModel: PlayerViewModel?
+    private var panel: NSPanel?
+    private let panelSize = NSSize(width: 420, height: 116)
+    private let windowPadding: CGFloat = 24
+
+    init(viewModel: PlayerViewModel) {
+        self.viewModel = viewModel
+    }
+
+    func setVisible(_ isVisible: Bool) {
+        if isVisible {
+            showWindow()
+        } else {
+            hideWindow()
+        }
+    }
+
+    private func showWindow() {
+        if panel == nil {
+            createWindow()
+        }
+
+        panel?.orderFrontRegardless()
+    }
+
+    private func hideWindow() {
+        panel?.orderOut(nil)
+    }
+
+    private func createWindow() {
+        guard let viewModel else { return }
+
+        let panel = NSPanel(
+            contentRect: initialFrame(),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isFloatingPanel = true
+        panel.level = .statusBar
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.isMovableByWindowBackground = true
+        panel.delegate = self
+
+        let hostingController = NSHostingController(rootView: MiniPlayerFloatingView(viewModel: viewModel))
+        hostingController.view.wantsLayer = true
+        hostingController.view.layer?.backgroundColor = NSColor.clear.cgColor
+        panel.contentViewController = hostingController
+        panel.contentView?.wantsLayer = true
+        panel.contentView?.layer?.backgroundColor = NSColor.clear.cgColor
+
+        self.panel = panel
+    }
+
+    private func initialFrame() -> NSRect {
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let visibleFrame = screen?.visibleFrame ?? NSRect(x: 180, y: 180, width: 1280, height: 720)
+        let x = visibleFrame.maxX - panelSize.width - windowPadding
+        let y = visibleFrame.maxY - panelSize.height - windowPadding
+        return NSRect(origin: NSPoint(x: x, y: y), size: panelSize)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        viewModel?.isMiniPlayerVisible = false
+    }
+}
+
 private struct DesktopLyricsView: View {
     @ObservedObject var viewModel: PlayerViewModel
 

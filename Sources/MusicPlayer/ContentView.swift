@@ -469,6 +469,8 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 playlistSwitcher
 
+                miniPlayerHeaderButton
+
                 compactHeaderIconButton {
                     viewModel.isEqualizerExpanded.toggle()
                 } label: {
@@ -520,11 +522,12 @@ struct ContentView: View {
     }
 
     private var compactHeader: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 4) {
             playlistSwitcher
-                .frame(maxWidth: .infinity)
 
-            HStack(spacing: 8) {
+            HStack(spacing: 4) {
+                miniPlayerHeaderButton
+
                 Menu {
                     Button(tr("添加歌曲", "Add Songs")) {
                         viewModel.openFiles()
@@ -546,6 +549,7 @@ struct ContentView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
+                .frame(width: 24, height: 18)
 
                 compactHeaderIconButton {
                     viewModel.searchArtworkOnlineForCurrentTrack()
@@ -562,6 +566,7 @@ struct ContentView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
+                .frame(width: 24, height: 18)
                 .disabled(viewModel.availableArtworkSources.isEmpty && viewModel.onlineArtworkSearchResults.isEmpty)
                 .help(tr("切换当前歌曲封面", "Switch artwork source for the current track"))
 
@@ -578,6 +583,7 @@ struct ContentView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
+                .frame(width: 24, height: 18)
 
                 compactHeaderIconButton {
                     isHistorySheetPresented = true
@@ -585,9 +591,8 @@ struct ContentView: View {
                     Image(systemName: "clock.arrow.circlepath")
                 }
             }
-            .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .center)
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(panelBackground(primary: true))
@@ -1118,7 +1123,7 @@ struct ContentView: View {
     }
 
     private var compactPlaylistBar: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: viewModel.interfaceMode == .compact ? 4 : 8) {
             Text(viewModel.selectedPlaylistName)
                 .font(.subheadline.weight(.semibold))
                 .lineLimit(1)
@@ -1362,6 +1367,15 @@ struct ContentView: View {
         .font(.system(size: 12, weight: .semibold))
     }
 
+    private var miniPlayerHeaderButton: some View {
+        compactHeaderIconButton {
+            viewModel.toggleMiniPlayer()
+        } label: {
+            Image(systemName: viewModel.isMiniPlayerVisible ? "pip.fill" : "pip")
+        }
+        .help(viewModel.isMiniPlayerVisible ? tr("关闭迷你播放器", "Hide Mini Player") : tr("打开迷你播放器", "Show Mini Player"))
+    }
+
     private func compactHeaderIconLabel(systemName: String) -> some View {
         compactHeaderIconLabel {
             Image(systemName: systemName)
@@ -1432,6 +1446,16 @@ struct ContentView: View {
             Spacer()
 
             HStack(spacing: 12) {
+                immersiveHeaderIconButton(
+                    systemName: viewModel.isMiniPlayerVisible ? "pip.fill" : "pip",
+                    helpText: viewModel.isMiniPlayerVisible
+                        ? tr("关闭迷你播放器", "Hide mini player")
+                        : tr("打开迷你播放器", "Show mini player"),
+                    emphasized: viewModel.isMiniPlayerVisible
+                ) {
+                    viewModel.toggleMiniPlayer()
+                }
+
                 immersivePlaylistPreviewTrigger
 
                 immersiveMetadataSearchButton
@@ -1985,7 +2009,7 @@ struct ContentView: View {
     private var playlistSwitcherWidth: CGFloat {
         switch viewModel.interfaceMode {
         case .compact:
-            return 126
+            return 88
         case .full:
             return 128
         case .immersive:
@@ -3035,6 +3059,195 @@ private struct AlbumArtworkView: View {
 
     private func artworkTransitionID(for artwork: NSImage) -> String {
         String(describing: ObjectIdentifier(artwork))
+    }
+}
+
+struct MiniPlayerFloatingView: View {
+    @ObservedObject var viewModel: PlayerViewModel
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: PlayerTheme {
+        PlayerTheme.forSelection(viewModel.appTheme, colorScheme: colorScheme)
+    }
+
+    private var language: PlayerViewModel.AppLanguage {
+        viewModel.appLanguage
+    }
+
+    private var titleArtistText: String {
+        guard let track = viewModel.currentTrack else {
+            return language.pick("未选择歌曲", "No Track Selected")
+        }
+
+        return "\(track.title)-\(track.artist ?? language.pick("未知艺术家", "Unknown Artist"))"
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            AlbumArtworkView(
+                artwork: viewModel.currentArtwork,
+                theme: theme,
+                usesImageBackground: viewModel.appTheme == .customImage,
+                size: 62,
+                cornerRadius: 16
+            )
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .center, spacing: 10) {
+                    Text(titleArtistText)
+                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        .lineLimit(1)
+                        .foregroundStyle(theme.primaryText)
+
+                    Spacer(minLength: 0)
+
+                    miniControls
+                }
+
+                SpectrumVisualizerView(
+                    levels: viewModel.audioSpectrumLevels,
+                    isPlaying: viewModel.isPlaying,
+                    theme: theme
+                )
+                .frame(height: 34)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(width: 420, height: 116)
+        .background(miniBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(theme.border.opacity(0.75), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(colorScheme == .dark ? 0.36 : 0.18), radius: 24, x: 0, y: 14)
+    }
+
+    private var miniControls: some View {
+        HStack(spacing: 8) {
+            miniButton(systemName: "backward.fill", helpText: language.pick("上一首", "Previous")) {
+                viewModel.playPrevious()
+            }
+
+            miniButton(
+                systemName: viewModel.isPlaying ? "pause.fill" : "play.fill",
+                helpText: viewModel.isPlaying ? language.pick("暂停", "Pause") : language.pick("播放", "Play"),
+                emphasized: true
+            ) {
+                viewModel.togglePlayback()
+            }
+
+            miniButton(systemName: "forward.fill", helpText: language.pick("下一首", "Next")) {
+                viewModel.playNext()
+            }
+        }
+    }
+
+    private var miniBackground: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(.ultraThinMaterial)
+
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            theme.panel.opacity(0.92),
+                            theme.panelSecondary.opacity(0.84)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        }
+    }
+
+    private func miniButton(
+        systemName: String,
+        helpText: String,
+        emphasized: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: emphasized ? 12 : 10, weight: .bold))
+                .foregroundStyle(emphasized ? Color.white : theme.primaryText)
+                .frame(width: emphasized ? 28 : 24, height: emphasized ? 28 : 24)
+                .background(
+                    Circle()
+                        .fill(emphasized ? theme.accent : theme.accentSoft.opacity(0.24))
+                )
+        }
+        .buttonStyle(.plain)
+        .help(helpText)
+    }
+}
+
+private struct SpectrumVisualizerView: View {
+    let levels: [CGFloat]
+    let isPlaying: Bool
+    let theme: PlayerTheme
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+            Canvas { canvasContext, size in
+                let barCount = max(levels.count, 1)
+                let spacing: CGFloat = 3
+                let barWidth = max((size.width - spacing * CGFloat(barCount - 1)) / CGFloat(barCount), 2)
+                let baseline = size.height
+                let time = context.date.timeIntervalSinceReferenceDate
+
+                for index in 0..<barCount {
+                    let rawLevel = levels.indices.contains(index) ? levels[index] : 0.04
+                    let pulse = isPlaying ? CGFloat((sin(time * 5.5 + Double(index) * 0.62) + 1) * 0.045) : 0
+                    let level = min(max(rawLevel + pulse, 0.035), 1)
+                    let barHeight = max(size.height * level, 3)
+                    let x = CGFloat(index) * (barWidth + spacing)
+                    let rect = CGRect(x: x, y: baseline - barHeight, width: barWidth, height: barHeight)
+                    let path = Path(roundedRect: rect, cornerRadius: min(barWidth / 2, 3))
+                    let colorBlend = Double(index) / Double(max(barCount - 1, 1))
+                    let opacity = isPlaying ? 0.58 + (0.34 * colorBlend) : 0.26
+
+                    canvasContext.fill(path, with: .color(theme.accent.opacity(opacity)))
+                }
+
+                let waveformPath = waveformPath(size: size, time: time)
+                canvasContext.stroke(
+                    waveformPath,
+                    with: .color(theme.primaryText.opacity(isPlaying ? 0.18 : 0.07)),
+                    lineWidth: 1.2
+                )
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(theme.primaryText.opacity(0.045))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func waveformPath(size: CGSize, time: TimeInterval) -> Path {
+        var path = Path()
+        let midY = size.height * 0.52
+        let segments = 36
+
+        for step in 0...segments {
+            let fraction = CGFloat(step) / CGFloat(segments)
+            let x = size.width * fraction
+            let levelIndex = min(Int(fraction * CGFloat(max(levels.count - 1, 0))), max(levels.count - 1, 0))
+            let level = levels.indices.contains(levelIndex) ? levels[levelIndex] : 0.04
+            let amplitude = size.height * (isPlaying ? (0.08 + level * 0.18) : 0.04)
+            let y = midY + CGFloat(sin(Double(fraction) * .pi * 4 + time * 3.2)) * amplitude
+
+            if step == 0 {
+                path.move(to: CGPoint(x: x, y: y))
+            } else {
+                path.addLine(to: CGPoint(x: x, y: y))
+            }
+        }
+
+        return path
     }
 }
 
