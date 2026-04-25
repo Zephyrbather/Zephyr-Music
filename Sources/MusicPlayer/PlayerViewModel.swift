@@ -1374,18 +1374,28 @@ final class PlayerViewModel: NSObject, ObservableObject {
     }
 
     func removeTracks(at offsets: IndexSet) {
-        guard let selectedPlaylistIndex else { return }
-        var updatedPlaylist = playlists[selectedPlaylistIndex]
-        let removedPaths = offsets.compactMap { index in
-            updatedPlaylist.tracks.indices.contains(index) ? normalizedPath(for: updatedPlaylist.tracks[index].url) : nil
+        removeTracks(at: offsets, in: selectedPlaylistID)
+    }
+
+    func removeTrack(at index: Int, in playlistID: UUID) {
+        removeTracks(at: IndexSet(integer: index), in: playlistID)
+    }
+
+    func removeTracks(at offsets: IndexSet, in playlistID: UUID) {
+        guard let playlistIndex = playlists.firstIndex(where: { $0.id == playlistID }) else { return }
+        var updatedPlaylist = playlists[playlistIndex]
+        let validOffsets = IndexSet(offsets.filter { updatedPlaylist.tracks.indices.contains($0) })
+        guard !validOffsets.isEmpty else { return }
+
+        let removedPaths = validOffsets.map { index in
+            normalizedPath(for: updatedPlaylist.tracks[index].url)
         }
-        let removedCurrent = currentIndex.map { offsets.contains($0) } ?? false
-        for index in offsets.sorted(by: >) {
-            if updatedPlaylist.tracks.indices.contains(index) {
-                updatedPlaylist.tracks.remove(at: index)
-            }
+        let removedCurrent = currentPlayingPlaylistID == updatedPlaylist.id && currentIndex.map { validOffsets.contains($0) } == true
+
+        for index in validOffsets.sorted(by: >) {
+            updatedPlaylist.tracks.remove(at: index)
         }
-        playlists[selectedPlaylistIndex] = updatedPlaylist
+        playlists[playlistIndex] = updatedPlaylist
         playbackQueue.removeAll { queued in
             queued.playlistID == updatedPlaylist.id && removedPaths.contains(normalizedPath(forPath: queued.trackPath))
         }
@@ -1398,7 +1408,7 @@ final class PlayerViewModel: NSObject, ObservableObject {
         }
 
         if removedCurrent, currentPlayingPlaylistID == updatedPlaylist.id {
-            let nextIndex = min(offsets.first ?? 0, playlist.count - 1)
+            let nextIndex = min(validOffsets.first ?? 0, updatedPlaylist.tracks.count - 1)
             playTrack(at: nextIndex, in: updatedPlaylist.id)
             return
         }

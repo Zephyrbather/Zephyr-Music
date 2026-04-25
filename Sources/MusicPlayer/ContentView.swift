@@ -1657,6 +1657,13 @@ struct ContentView: View {
                                 .onTapGesture {
                                     viewModel.play(track: item.track, in: immersivePreviewPlaylistID)
                                 }
+                                .contextMenu {
+                                    Button(role: .destructive) {
+                                        viewModel.removeTrack(at: item.index, in: immersivePreviewPlaylistID)
+                                    } label: {
+                                        Label(tr("从列表删除", "Remove from List"), systemImage: "trash")
+                                    }
+                                }
                                 .id(item.index)
                             }
                         }
@@ -3063,8 +3070,14 @@ private struct AlbumArtworkView: View {
 }
 
 struct MiniPlayerFloatingView: View {
+    private enum VisualizationMode: Equatable {
+        case spectrum
+        case progress
+    }
+
     @ObservedObject var viewModel: PlayerViewModel
     @Environment(\.colorScheme) private var colorScheme
+    @State private var visualizationMode: VisualizationMode = .spectrum
 
     private var theme: PlayerTheme {
         PlayerTheme.forSelection(viewModel.appTheme, colorScheme: colorScheme)
@@ -3083,14 +3096,25 @@ struct MiniPlayerFloatingView: View {
     }
 
     var body: some View {
+        miniCard
+            .frame(width: 420, height: 116)
+    }
+
+    private var miniCard: some View {
         HStack(spacing: 12) {
-            AlbumArtworkView(
-                artwork: viewModel.currentArtwork,
-                theme: theme,
-                usesImageBackground: viewModel.appTheme == .customImage,
-                size: 62,
-                cornerRadius: 16
-            )
+            Button {
+                openImmersiveMode()
+            } label: {
+                AlbumArtworkView(
+                    artwork: viewModel.currentArtwork,
+                    theme: theme,
+                    usesImageBackground: viewModel.appTheme == .customImage,
+                    size: 62,
+                    cornerRadius: 16
+                )
+            }
+            .buttonStyle(.plain)
+            .help(language.pick("点击封面进入沉浸式模式", "Click artwork to enter immersive mode"))
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .center, spacing: 10) {
@@ -3104,12 +3128,7 @@ struct MiniPlayerFloatingView: View {
                     miniControls
                 }
 
-                SpectrumVisualizerView(
-                    levels: viewModel.audioSpectrumLevels,
-                    isPlaying: viewModel.isPlaying,
-                    theme: theme
-                )
-                .frame(height: 34)
+                visualizationContent
             }
         }
         .padding(.horizontal, 14)
@@ -3121,11 +3140,64 @@ struct MiniPlayerFloatingView: View {
             RoundedRectangle(cornerRadius: 24, style: .continuous)
                 .stroke(theme.border.opacity(0.75), lineWidth: 1)
         )
-        .shadow(color: .black.opacity(colorScheme == .dark ? 0.36 : 0.18), radius: 24, x: 0, y: 14)
+    }
+
+    @ViewBuilder
+    private var visualizationContent: some View {
+        Group {
+            switch visualizationMode {
+            case .spectrum:
+                SpectrumVisualizerView(
+                    levels: viewModel.audioSpectrumLevels,
+                    isPlaying: viewModel.isPlaying,
+                    theme: theme
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+
+            case .progress:
+                MiniPlayerProgressView(
+                    progress: viewModel.progress,
+                    currentTimeText: viewModel.formatTime(viewModel.currentTime),
+                    durationText: viewModel.formatTime(viewModel.duration),
+                    theme: theme,
+                    onSeek: { progress in
+                        viewModel.seek(to: progress)
+                    },
+                    onToggleSpectrum: {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            visualizationMode = .spectrum
+                        }
+                    }
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            }
+        }
+        .frame(height: 34)
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onTapGesture {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                visualizationMode = visualizationMode == .spectrum ? .progress : .spectrum
+            }
+        }
+        .help(visualizationMode == .spectrum
+            ? language.pick("点击切换到播放进度", "Click to show playback progress")
+            : language.pick("拖动进度条可跳转，点击空白区域切回频谱", "Drag the progress bar to seek; click empty space to show spectrum")
+        )
+    }
+
+    private func openImmersiveMode() {
+        NSApp.activate(ignoringOtherApps: true)
+        if viewModel.interfaceMode != .immersive {
+            viewModel.toggleImmersiveMode()
+        }
     }
 
     private var miniControls: some View {
         HStack(spacing: 8) {
+            miniButton(systemName: viewModel.playbackMode.symbolName, helpText: viewModel.playbackMode.title(in: language)) {
+                viewModel.cyclePlaybackMode()
+            }
+
             miniButton(systemName: "backward.fill", helpText: language.pick("上一首", "Previous")) {
                 viewModel.playPrevious()
             }
@@ -3140,6 +3212,16 @@ struct MiniPlayerFloatingView: View {
 
             miniButton(systemName: "forward.fill", helpText: language.pick("下一首", "Next")) {
                 viewModel.playNext()
+            }
+
+            miniButton(
+                systemName: viewModel.isDesktopLyricsVisible ? "quote.bubble.fill" : "quote.bubble",
+                helpText: viewModel.isDesktopLyricsVisible
+                    ? language.pick("关闭桌面歌词", "Hide Desktop Lyrics")
+                    : language.pick("开启桌面歌词", "Show Desktop Lyrics"),
+                active: viewModel.isDesktopLyricsVisible
+            ) {
+                viewModel.isDesktopLyricsVisible.toggle()
             }
         }
     }
@@ -3167,20 +3249,113 @@ struct MiniPlayerFloatingView: View {
         systemName: String,
         helpText: String,
         emphasized: Bool = false,
+        active: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: emphasized ? 12 : 10, weight: .bold))
-                .foregroundStyle(emphasized ? Color.white : theme.primaryText)
+                .foregroundStyle((emphasized || active) ? Color.white : theme.primaryText)
                 .frame(width: emphasized ? 28 : 24, height: emphasized ? 28 : 24)
                 .background(
                     Circle()
-                        .fill(emphasized ? theme.accent : theme.accentSoft.opacity(0.24))
+                        .fill((emphasized || active) ? theme.accent : theme.accentSoft.opacity(0.24))
                 )
         }
         .buttonStyle(.plain)
         .help(helpText)
+    }
+}
+
+private struct MiniPlayerProgressView: View {
+    let progress: Double
+    let currentTimeText: String
+    let durationText: String
+    let theme: PlayerTheme
+    let onSeek: (Double) -> Void
+    let onToggleSpectrum: () -> Void
+
+    @State private var scrubProgress: CGFloat?
+    @State private var isScrubbingProgress = false
+
+    private var clampedProgress: CGFloat {
+        guard progress.isFinite else { return 0 }
+        return CGFloat(min(max(progress, 0), 1))
+    }
+
+    private var displayedProgress: CGFloat {
+        scrubProgress ?? clampedProgress
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(currentTimeText)
+                .frame(width: 42, alignment: .leading)
+
+            GeometryReader { geometry in
+                let barWidth = geometry.size.width
+                let fillWidth = max(barWidth * displayedProgress, displayedProgress > 0 ? 4 : 0)
+
+                ZStack(alignment: .leading) {
+                    Capsule(style: .continuous)
+                        .fill(theme.primaryText.opacity(0.10))
+                        .frame(height: 6)
+
+                    Capsule(style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [theme.accent, theme.accentSoft.opacity(0.9)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: fillWidth, height: 6)
+
+                    Circle()
+                        .fill(theme.accent)
+                        .frame(width: 9, height: 9)
+                        .shadow(color: theme.accent.opacity(0.32), radius: 4, x: 0, y: 2)
+                        .offset(x: min(max(fillWidth - 4.5, 0), max(barWidth - 9, 0)))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            isScrubbingProgress = true
+                            let nextProgress = min(max(value.location.x / max(barWidth, 1), 0), 1)
+                            scrubProgress = nextProgress
+                            onSeek(Double(nextProgress))
+                        }
+                        .onEnded { value in
+                            let nextProgress = min(max(value.location.x / max(barWidth, 1), 0), 1)
+                            onSeek(Double(nextProgress))
+                            scrubProgress = nil
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                                isScrubbingProgress = false
+                            }
+                        }
+                )
+            }
+            .frame(height: 18)
+
+            Text(durationText)
+                .frame(width: 42, alignment: .trailing)
+        }
+        .font(.caption2.monospacedDigit().weight(.semibold))
+        .foregroundStyle(theme.secondaryText)
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(theme.primaryText.opacity(0.045))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onTapGesture {
+            guard !isScrubbingProgress else { return }
+            onToggleSpectrum()
+        }
     }
 }
 
@@ -3598,6 +3773,8 @@ private struct PlaylistListView: View, @MainActor Equatable {
                         addToNewPlaylistAction(item.track)
                     } addToPlaylistAction: { playlistID in
                         addToPlaylistAction(item.track, playlistID)
+                    } removeFromListAction: {
+                        removeAction(IndexSet(integer: item.index))
                     }
                     .equatable()
                     .id(item.id)
@@ -3660,6 +3837,7 @@ private struct PlaylistRow: View, @MainActor Equatable {
     let queueNextAction: () -> Void
     let addToNewPlaylistAction: () -> Void
     let addToPlaylistAction: (UUID) -> Void
+    let removeFromListAction: () -> Void
 
     static func == (lhs: PlaylistRow, rhs: PlaylistRow) -> Bool {
         lhs.track == rhs.track &&
@@ -3723,6 +3901,14 @@ private struct PlaylistRow: View, @MainActor Equatable {
                 }
             }
             .disabled(playlistDestinations.isEmpty)
+
+            Divider()
+
+            Button(role: .destructive) {
+                removeFromListAction()
+            } label: {
+                Label(language.pick("从列表删除", "Remove from List"), systemImage: "trash")
+            }
         }
         .listRowBackground(Color.clear)
     }
